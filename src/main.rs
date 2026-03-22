@@ -58,11 +58,26 @@ async fn main() -> Result<()> {
     println!("Streaming: {}", config.agent.streaming);
     println!("Type /quit to exit\n");
 
-    let agent = nocelium_core::agent::build_agent(&config, &identity)?;
+    let memory = if config.memory.enabled {
+        let client = nocelium_memory::MemoryClient::new(&config.memory.socket_path, 3);
+        println!("Memory: enabled ({})", config.memory.socket_path);
+        Some(std::sync::Arc::new(client))
+    } else {
+        println!("Memory: disabled");
+        None
+    };
+
+    let agent = nocelium_core::agent::build_agent(&config, &identity, memory.clone())?;
 
     // Run with stdio channel
     let mut channel = StdioChannel::new();
-    nocelium_core::agent::run_loop(&agent, &mut channel, config.agent.streaming).await?;
+    nocelium_core::agent::run_loop(
+        &agent,
+        &mut channel,
+        config.agent.streaming,
+        memory.as_deref(),
+    )
+    .await?;
 
     Ok(())
 }

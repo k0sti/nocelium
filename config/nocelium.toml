@@ -22,8 +22,8 @@ base_url = "https://openrouter.ai/api/v1"
 # api_key = ""
 
 [memory]
-# Nomen API endpoint
-# nomen_url = "http://localhost:3000"
+# Nomen socket path (default: $XDG_RUNTIME_DIR/nomen/nomen.sock)
+# socket_path = "/run/nomen.sock"
 enabled = false
 
 [channels]

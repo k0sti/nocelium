@@ -4,16 +4,19 @@ use rig::agent::Agent;
 use rig::client::CompletionClient;
 use rig::completion::Prompt;
 use rig::streaming::StreamingPrompt;
+use std::sync::Arc;
 
 use crate::config::Config;
 use crate::identity::Identity;
 use nocelium_channels::Channel;
-use nocelium_tools::{ShellTool, ReadFileTool, WriteFileTool};
+use nocelium_memory::MemoryClient;
+use nocelium_tools::{ShellTool, ReadFileTool, WriteFileTool, NomenSearchTool, NomenStoreTool};
 
 /// Build a rig Agent from config using OpenAI-compatible provider (OpenRouter)
 pub fn build_agent(
     config: &Config,
     identity: &Identity,
+    memory: Option<Arc<MemoryClient>>,
 ) -> Result<Agent<openai::completion::CompletionModel>> {
     let api_key = config
         .provider
@@ -39,23 +42,29 @@ pub fn build_agent(
         identity.npub()
     );
 
-    let agent = client
+    let mut builder = client
         .agent(&config.provider.model)
         .preamble(&preamble)
         .max_tokens(config.agent.max_tokens)
         .tool(ShellTool)
         .tool(ReadFileTool)
-        .tool(WriteFileTool)
-        .build();
+        .tool(WriteFileTool);
 
-    Ok(agent)
+    if let Some(ref mem) = memory {
+        builder = builder
+            .tool(NomenSearchTool::new(Arc::clone(mem)))
+            .tool(NomenStoreTool::new(Arc::clone(mem)));
+    }
+
+    Ok(builder.build())
 }
 
-/// The main agent loop: receive → think → act → respond
+/// The main agent loop: receive → enrich → think → act → respond
 pub async fn run_loop(
     agent: &Agent<openai::completion::CompletionModel>,
     channel: &mut dyn Channel,
     streaming: bool,
+    memory: Option<&MemoryClient>,
 ) -> Result<()> {
     tracing::info!(streaming = streaming, "Agent loop started. Waiting for messages...");
 
@@ -74,12 +83,18 @@ pub async fn run_loop(
 
                 tracing::debug!(message = %message, "Received message");
 
+                // Context enrichment: search memory for relevant context
+                let enriched = match memory {
+                    Some(mem) => enrich_with_context(mem, &message).await,
+                    None => message.clone(),
+                };
+
                 if streaming {
                     use futures::StreamExt;
                     use rig::agent::{MultiTurnStreamItem, Text};
                     use rig::streaming::StreamedAssistantContent;
 
-                    let mut stream = agent.stream_prompt(&message).await;
+                    let mut stream = agent.stream_prompt(&enriched).await;
 
                     while let Some(item) = stream.next().await {
                         match item {
@@ -100,7 +115,7 @@ pub async fn run_loop(
                     channel.send_chunk("\n").await?;
                     channel.flush().await?;
                 } else {
-                    match agent.prompt(&message).await {
+                    match agent.prompt(&enriched).await {
                         Ok(response) => {
                             channel.send(&response).await?;
                         }
@@ -124,4 +139,22 @@ pub async fn run_loop(
     }
 
     Ok(())
+}
+
+/// Search memory for context relevant to the user message.
+async fn enrich_with_context(mem: &MemoryClient, message: &str) -> String {
+    match mem.search(message.trim(), 5, None, None).await {
+        Ok(memories) if !memories.is_empty() => {
+            let context: Vec<String> = memories
+                .iter()
+                .map(|m| format!("- [{}]: {}", m.topic, m.summary))
+                .collect();
+            format!("{message}\n\n## Relevant Context\n{}", context.join("\n"))
+        }
+        Ok(_) => message.to_string(),
+        Err(e) => {
+            tracing::warn!(error = %e, "Memory search failed, proceeding without context");
+            message.to_string()
+        }
+    }
 }

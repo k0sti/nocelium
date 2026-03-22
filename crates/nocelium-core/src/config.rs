@@ -51,7 +51,18 @@ pub struct RoutstrConfig {
 pub struct MemoryConfig {
     #[serde(default)]
     pub enabled: bool,
-    pub nomen_url: Option<String>,
+    #[serde(default = "default_socket_path")]
+    pub socket_path: String,
+}
+
+fn default_socket_path() -> String {
+    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+        format!("{xdg}/nomen/nomen.sock")
+    } else if let Ok(user) = std::env::var("USER") {
+        format!("/tmp/nomen-{user}/nomen.sock")
+    } else {
+        "/tmp/nomen.sock".to_string()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]

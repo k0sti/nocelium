@@ -10,6 +10,12 @@ pub struct StdioChannel {
     writer: tokio::io::Stdout,
 }
 
+impl Default for StdioChannel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StdioChannel {
     pub fn new() -> Self {
         Self {
