@@ -27,6 +27,10 @@ async fn main() -> Result<()> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("nocelium=info".parse()?)
+                .add_directive("nocelium_core=info".parse()?)
+                .add_directive("nocelium_tools=info".parse()?)
+                .add_directive("nocelium_memory=info".parse()?)
+                .add_directive("nocelium_channels=info".parse()?)
         )
         .init();
 

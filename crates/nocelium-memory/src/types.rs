@@ -3,18 +3,21 @@ use serde::{Deserialize, Serialize};
 /// A memory record returned by Nomen.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memory {
-    pub topic: String,
-    pub summary: String,
     #[serde(default)]
-    pub detail: Option<String>,
+    pub topic: String,
+    #[serde(default)]
+    pub detail: String,
     #[serde(default)]
     pub visibility: Option<String>,
     #[serde(default)]
     pub scope: Option<String>,
     #[serde(default)]
-    pub confidence: Option<String>,
+    pub confidence: Option<f64>,
     #[serde(default)]
     pub created_at: Option<String>,
+    /// Search match type (hybrid, vector, text, etc.)
+    #[serde(default)]
+    pub match_type: Option<String>,
 }
 
 /// Visibility level for memory storage.

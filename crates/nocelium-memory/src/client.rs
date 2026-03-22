@@ -69,14 +69,12 @@ impl MemoryClient {
     pub async fn store(
         &self,
         topic: &str,
-        summary: &str,
         detail: &str,
         visibility: Option<&Visibility>,
         scope: Option<&str>,
     ) -> Result<String, MemoryError> {
         let mut params = json!({
             "topic": topic,
-            "summary": summary,
             "detail": detail,
         });
         if let Some(vis) = visibility {

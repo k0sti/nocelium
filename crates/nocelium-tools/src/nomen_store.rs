@@ -12,10 +12,8 @@ use crate::error::NomenToolError;
 pub struct NomenStoreInput {
     /// Topic path for the memory (e.g. "project/design-decisions")
     pub topic: String,
-    /// Short summary of the memory (one sentence)
-    pub summary: String,
-    /// Detailed content (optional, defaults to summary)
-    pub detail: Option<String>,
+    /// Content of the memory
+    pub detail: String,
 }
 
 pub struct NomenStoreTool {
@@ -45,12 +43,11 @@ impl Tool for NomenStoreTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let detail = args.detail.as_deref().unwrap_or(&args.summary);
         tracing::info!(topic = %args.topic, "Storing memory");
 
         let d_tag = self
             .client
-            .store(&args.topic, &args.summary, detail, None, None)
+            .store(&args.topic, &args.detail, None, None)
             .await
             .map_err(|e| NomenToolError::Memory(e.to_string()))?;
 

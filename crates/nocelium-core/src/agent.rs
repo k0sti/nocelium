@@ -144,15 +144,22 @@ pub async fn run_loop(
 
 /// Search memory for context relevant to the user message.
 async fn enrich_with_context(mem: &MemoryClient, message: &str) -> String {
+    tracing::debug!(query = %message.trim(), "Searching memory for context");
     match mem.search(message.trim(), 5, None, None).await {
         Ok(memories) if !memories.is_empty() => {
+            tracing::info!(count = memories.len(), "Found relevant memories");
             let context: Vec<String> = memories
                 .iter()
-                .map(|m| format!("- [{}]: {}", m.topic, m.summary))
+                .map(|m| format!("- [{}]: {}", m.topic, m.detail))
                 .collect();
-            format!("{message}\n\n## Relevant Context\n{}", context.join("\n"))
+            let enriched = format!("{message}\n\n## Relevant Context\n{}", context.join("\n"));
+            tracing::debug!(enriched = %enriched, "Enriched prompt");
+            enriched
         }
-        Ok(_) => message.to_string(),
+        Ok(_) => {
+            tracing::debug!("No relevant memories found");
+            message.to_string()
+        }
         Err(e) => {
             tracing::warn!(error = %e, "Memory search failed, proceeding without context");
             message.to_string()

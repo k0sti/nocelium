@@ -59,7 +59,7 @@ impl Tool for NomenSearchTool {
         let formatted: Vec<String> = results
             .iter()
             .enumerate()
-            .map(|(i, m)| format!("{}. [{}]: {}", i + 1, m.topic, m.summary))
+            .map(|(i, m)| format!("{}. [{}]: {}", i + 1, m.topic, m.detail))
             .collect();
 
         Ok(formatted.join("\n"))

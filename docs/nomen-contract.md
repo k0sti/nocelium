@@ -53,7 +53,7 @@ let resp = client.request("memory.search", json!({"query": "...", "limit": 10}))
 | Action | Purpose | Key Params |
 |---|---|---|
 | `memory.search` | Semantic search for context enrichment | `query`, `limit`, `visibility`, `scope`, `vector_weight`, `text_weight` |
-| `memory.put` | Store config, cron tasks, knowledge | `topic`, `summary`, `detail`, `visibility`, `scope` |
+| `memory.put` | Store config, cron tasks, knowledge | `topic`, `detail`, `visibility`, `scope` |
 | `memory.get` | Retrieve config topic | `topic` |
 | `memory.get_batch` | Retrieve multiple config topics at startup | `topics[]` |
 | `memory.list` | List cron/* or config/* topics | `prefix`, `limit` |
