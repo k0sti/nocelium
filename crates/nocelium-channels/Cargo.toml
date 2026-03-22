@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+telegram = ["teloxide"]
+
 [dependencies]
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -11,3 +14,5 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
+
+teloxide = { version = "0.13", features = ["macros"], optional = true }

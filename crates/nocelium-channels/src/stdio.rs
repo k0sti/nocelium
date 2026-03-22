@@ -1,13 +1,20 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::mpsc;
 
-use crate::Channel;
+use crate::{
+    Channel, ChannelCapabilities, ChatType, Event, Message, OutboundMessage, Payload, SendResult,
+    Source,
+};
 
-/// Interactive stdin/stdout channel for testing
-pub struct StdioChannel {
-    reader: BufReader<tokio::io::Stdin>,
-    writer: tokio::io::Stdout,
+/// Interactive stdin/stdout channel
+pub struct StdioChannel;
+
+impl StdioChannel {
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Default for StdioChannel {
@@ -16,47 +23,70 @@ impl Default for StdioChannel {
     }
 }
 
-impl StdioChannel {
-    pub fn new() -> Self {
-        Self {
-            reader: BufReader::new(tokio::io::stdin()),
-            writer: tokio::io::stdout(),
-        }
-    }
-}
-
 #[async_trait]
 impl Channel for StdioChannel {
-    async fn receive(&mut self) -> Result<Option<String>> {
-        self.writer.write_all(b"\n> ").await?;
-        self.writer.flush().await?;
+    fn name(&self) -> &str {
+        "stdio"
+    }
 
-        let mut line = String::new();
-        let bytes_read = self.reader.read_line(&mut line).await?;
+    fn capabilities(&self) -> ChannelCapabilities {
+        ChannelCapabilities::default()
+    }
 
-        if bytes_read == 0 {
-            return Ok(None); // EOF
+    async fn listen(&self, tx: mpsc::Sender<Event>) -> Result<()> {
+        let mut reader = BufReader::new(tokio::io::stdin());
+        let mut stdout = tokio::io::stdout();
+
+        loop {
+            stdout.write_all(b"> ").await?;
+            stdout.flush().await?;
+
+            let mut line = String::new();
+            let bytes_read = reader.read_line(&mut line).await?;
+
+            if bytes_read == 0 {
+                break; // EOF
+            }
+
+            let text = line.trim().to_string();
+            if text.is_empty() {
+                continue;
+            }
+
+            if text == "/quit" || text == "/exit" {
+                stdout.write_all(b"Goodbye!\n").await?;
+                stdout.flush().await?;
+                break;
+            }
+
+            let event = Event::new(
+                Source::Channel {
+                    name: "stdio".into(),
+                    chat_id: "local".into(),
+                    sender_id: "user".into(),
+                },
+                Payload::Message(Box::new(Message {
+                    text,
+                    chat_type: ChatType::Direct,
+                    ..Default::default()
+                })),
+            );
+
+            if tx.send(event).await.is_err() {
+                break; // receiver dropped
+            }
         }
 
-        Ok(Some(line.trim().to_string()))
-    }
-
-    async fn send(&mut self, message: &str) -> Result<()> {
-        self.writer.write_all(b"\n").await?;
-        self.writer.write_all(message.as_bytes()).await?;
-        self.writer.write_all(b"\n").await?;
-        self.writer.flush().await?;
         Ok(())
     }
 
-    async fn send_chunk(&mut self, chunk: &str) -> Result<()> {
-        self.writer.write_all(chunk.as_bytes()).await?;
-        self.writer.flush().await?;
-        Ok(())
-    }
-
-    async fn flush(&mut self) -> Result<()> {
-        self.writer.flush().await?;
-        Ok(())
+    async fn send(&self, message: &OutboundMessage) -> Result<SendResult> {
+        let mut stdout = tokio::io::stdout();
+        stdout.write_all(message.text.as_bytes()).await?;
+        stdout.write_all(b"\n").await?;
+        stdout.flush().await?;
+        Ok(SendResult {
+            message_id: "0".into(),
+        })
     }
 }

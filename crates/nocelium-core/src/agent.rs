@@ -3,12 +3,13 @@ use rig::providers::openai;
 use rig::agent::Agent;
 use rig::client::CompletionClient;
 use rig::completion::Prompt;
-use rig::streaming::StreamingPrompt;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::config::Config;
+use crate::dispatch::{DispatchAction, Dispatcher};
 use crate::identity::Identity;
-use nocelium_channels::Channel;
+use nocelium_channels::{Channel, Event, OutboundMessage, Payload};
 use nocelium_memory::MemoryClient;
 use nocelium_tools::{ShellTool, ReadFileTool, WriteFileTool, NomenSearchTool, NomenStoreTool};
 
@@ -60,85 +61,80 @@ pub fn build_agent(
     Ok(builder.build())
 }
 
-/// The main agent loop: receive → enrich → think → act → respond
+/// The main agent loop: receive events → dispatch → enrich → think → respond
 pub async fn run_loop(
     agent: &Agent<openai::completion::CompletionModel>,
-    channel: &mut dyn Channel,
-    streaming: bool,
+    event_rx: &mut tokio::sync::mpsc::Receiver<Event>,
+    channels: &HashMap<String, Arc<dyn Channel>>,
+    dispatcher: &Dispatcher,
     memory: Option<&MemoryClient>,
 ) -> Result<()> {
-    tracing::info!(streaming = streaming, "Agent loop started. Waiting for messages...");
+    tracing::info!("Agent loop started. Waiting for events...");
 
-    loop {
-        match channel.receive().await {
-            Ok(Some(message)) => {
-                if message.trim().is_empty() {
+    while let Some(event) = event_rx.recv().await {
+        let rule = dispatcher.match_rule(&event.key);
+        tracing::debug!(key = %event.key, "Dispatching event");
+
+        match &rule.action {
+            DispatchAction::Drop => {
+                tracing::debug!(key = %event.key, "Dropping event");
+                continue;
+            }
+            DispatchAction::Handler(name) => {
+                tracing::warn!(handler = %name, "Handler dispatch not yet implemented");
+                continue;
+            }
+            DispatchAction::AgentTurn => {
+                // Extract text from message payload
+                let text = match &event.payload {
+                    Payload::Message(msg) => &msg.text,
+                    _ => {
+                        tracing::debug!(key = %event.key, "Non-message event, skipping agent turn");
+                        continue;
+                    }
+                };
+
+                if text.trim().is_empty() {
                     continue;
                 }
 
-                if message.trim() == "/quit" || message.trim() == "/exit" {
-                    tracing::info!("Exit command received");
-                    channel.send("Goodbye!").await?;
-                    break;
-                }
+                tracing::debug!(message = %text, source = %event.key, "Processing message");
 
-                tracing::debug!(message = %message, "Received message");
-
-                // Context enrichment: search memory for relevant context
+                // Context enrichment
                 let enriched = match memory {
-                    Some(mem) => enrich_with_context(mem, &message).await,
-                    None => message.clone(),
+                    Some(mem) => enrich_with_context(mem, text).await,
+                    None => text.clone(),
                 };
 
-                if streaming {
-                    use futures::StreamExt;
-                    use rig::agent::{MultiTurnStreamItem, Text};
-                    use rig::streaming::StreamedAssistantContent;
-
-                    let mut stream = agent.stream_prompt(&enriched).await;
-
-                    while let Some(item) = stream.next().await {
-                        match item {
-                            Ok(MultiTurnStreamItem::StreamAssistantItem(
-                                StreamedAssistantContent::Text(Text { text }),
-                            )) => {
-                                channel.send_chunk(&text).await?;
-                            }
-                            Ok(MultiTurnStreamItem::FinalResponse(_)) => {}
-                            Err(e) => {
-                                let error_msg = format!("\nError: {}", e);
-                                tracing::error!(error = %e, "Streaming error");
-                                channel.send(&error_msg).await?;
-                            }
-                            _ => {}
-                        }
+                // Call LLM
+                let response = match agent.prompt(&enriched).await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        tracing::error!(error = %e, "Agent prompt failed");
+                        format!("Error: {}", e)
                     }
-                    channel.send_chunk("\n").await?;
-                    channel.flush().await?;
+                };
+
+                // Route response back to the source channel
+                let channel_name = event.source.channel_name().unwrap_or("stdio");
+                if let Some(channel) = channels.get(channel_name) {
+                    let chat_id = event.source.chat_id().unwrap_or("local").to_string();
+                    let outbound = OutboundMessage {
+                        chat_id,
+                        text: response,
+                        ..Default::default()
+                    };
+                    if let Err(e) = channel.send(&outbound).await {
+                        tracing::error!(error = %e, channel = %channel_name, "Failed to send response");
+                    }
                 } else {
-                    match agent.prompt(&enriched).await {
-                        Ok(response) => {
-                            channel.send(&response).await?;
-                        }
-                        Err(e) => {
-                            let error_msg = format!("Error: {}", e);
-                            tracing::error!(error = %e, "Agent prompt failed");
-                            channel.send(&error_msg).await?;
-                        }
-                    }
+                    tracing::error!(channel = %channel_name, "No channel found for response routing");
                 }
-            }
-            Ok(None) => {
-                tracing::info!("Channel closed");
-                break;
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Channel receive error");
-                break;
             }
         }
     }
 
+    tracing::info!("Event channel closed, agent loop ending");
     Ok(())
 }
 

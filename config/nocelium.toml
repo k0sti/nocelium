@@ -23,8 +23,8 @@ base_url = "https://openrouter.ai/api/v1"
 
 [memory]
 # Nomen socket path (default: $XDG_RUNTIME_DIR/nomen/nomen.sock)
-# socket_path = "/run/nomen.sock"
-enabled = false
+socket_path = "/tmp/nomen-k0/nomen.sock"
+enabled = true
 
 [channels]
 # Enable stdin/stdout channel for testing

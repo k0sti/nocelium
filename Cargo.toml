@@ -34,6 +34,8 @@ schemars = "0.8"
 futures = "0.3"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
+teloxide = { version = "0.13", features = ["macros"] }
+dirs = "6"
 
 [package]
 name = "nocelium"
@@ -52,3 +54,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
+dirs = { workspace = true }
+
+[features]
+telegram = ["nocelium-channels/telegram"]
