@@ -6,53 +6,51 @@ Nocelium is a Nostr-native AI agent runtime. Single Rust binary, workspace of fo
 
 ## System Map
 
+### Runtime Flow
+
+```mermaid
+graph LR
+    subgraph inbound["Inbound (all produce Event)"]
+        TG["Telegram"]
+        NOSTR_CH["Nostr"]
+        STDIO["stdio"]
+        CRON["CronSource"]
+        WH["Webhooks"]
+    end
+
+    Q["Event Queue"]
+    DISP["Dispatcher"]
+
+    subgraph processing["Processing"]
+        HANDLER["Handler<br/>(no LLM)"]
+        PROMPT["PromptBuilder"]
+        LLM["LLM"]
+    end
+
+    TOOLS["Tools<br/>(shell, fs, memory, http)"]
+
+    inbound --> Q --> DISP
+    DISP --> HANDLER
+    DISP --> PROMPT --> LLM
+    LLM <--> TOOLS
+```
+
+### Dependencies
+
 ```mermaid
 graph TD
-    TOML["nocelium.toml<br/>(bootstrap: identity + nomen)"]
+    TOML["nocelium.toml<br/>(identity + socket path)"]
+    NOMEN["Nomen<br/>(config, memory, prompts, cron)"]
+    LLM_EXT["LLM Provider"]
+    NOSTR_EXT["Nostr Relays"]
 
-    subgraph core["nocelium-core"]
-        AGENT["Agent Loop<br/>select! on channels + events"]
-        IDENTITY["Identity<br/>(Nostr keypair)"]
-        EVENTS["Event Queue<br/>(single mpsc)"]
-    end
-
-    subgraph sources["Event Sources"]
-        CRON["CronSource<br/>(timers, cron)"]
-        WH["WebhookSource<br/>(HTTP POST)"]
-        NSRC["NostrSource<br/>(relay filters)"]
-    end
-
-    subgraph crates["Supporting Crates"]
-        TOOLS["nocelium-tools<br/>Tool impls"]
-        MEM["nocelium-memory<br/>NomenClient"]
-        CHANLIB["nocelium-channels<br/>Channel trait"]
-    end
-
-    subgraph external["External Services"]
-        LLM["LLM Provider<br/>(OpenRouter / Routstr)"]
-        NOMEN["Nomen<br/>(config + memory + cron)"]
-        NOSTR["Nostr Relays"]
-        TG["Telegram API"]
-    end
-
-    TOML --> IDENTITY
-    TOML --> MEM
-    MEM --> NOMEN
-    NOMEN --> AGENT
-    NOMEN --> CRON
-    NOMEN --> WH
-    NOMEN --> NSRC
-    CRON --> EVENTS
-    WH --> EVENTS
-    NSRC --> EVENTS
-    EVENTS --> AGENT
-    CHANLIB --> AGENT
-    AGENT --> TOOLS
-    AGENT --> MEM
-    AGENT --> LLM
-    CHANLIB --> TG
-    CHANLIB --> NOSTR
-    IDENTITY --> NOSTR
+    TOML -->|bootstrap| NOMEN
+    NOMEN -->|config, prompts, context| PROMPT["PromptBuilder"]
+    NOMEN -->|search, store| TOOLS["Tools"]
+    NOMEN -->|cron tasks| CRON["CronSource"]
+    NOMEN -->|dispatch rules| DISP["Dispatcher"]
+    PROMPT --> LLM_EXT
+    NOSTR_EXT -->|identity, channels| AGENT["Agent"]
 ```
 
 ## Input / Output Model
