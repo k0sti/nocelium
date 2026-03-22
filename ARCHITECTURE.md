@@ -76,7 +76,8 @@ Config + State:
 
 | Boundary | Trait / Type | Called by | Methods | Status |
 |---|---|---|---|---|
-| core → channels | `Channel` trait | agent loop | `receive()`, `send()`, `send_chunk()`, `flush()` | ✅ impl: stdio |
+| core → channels | `Channel` trait | agent loop | `listen(tx)`, `send()`, `edit()`, `delete()`, reactions, typing, pins, polls, location | ✅ impl: stdio |
+| core → channels | `ChannelInfo` trait (optional) | agent loop | `list_chats()`, `list_topics()`, `get_chat()`, `get_member()` | 🔲 planned |
 | core → tools | rig `Tool` trait | LLM via rig | `definition()`, `call()` | ✅ impl: shell, read, write |
 | core → memory | `MemoryClient` (wraps `nomen-wire::ReconnectingClient`) | agent loop + tools + event sources | `search()`, `store()`, `get()`, `list()`, `delete()`, `subscribe()` | 🔲 stub |
 | core → LLM | rig `Agent` | agent loop | `prompt()`, `stream_prompt()` | ✅ OpenRouter |
