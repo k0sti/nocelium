@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 use crate::{
     Channel, ChannelCapabilities, ChatType, Event, Message, OutboundMessage, Payload, SendResult,
@@ -9,11 +9,16 @@ use crate::{
 };
 
 /// Interactive stdin/stdout channel
-pub struct StdioChannel;
+pub struct StdioChannel {
+    /// Notifies listen() that send() has completed, so the next prompt can be shown.
+    response_ready: Notify,
+}
 
 impl StdioChannel {
     pub fn new() -> Self {
-        Self
+        Self {
+            response_ready: Notify::new(),
+        }
     }
 }
 
@@ -75,6 +80,9 @@ impl Channel for StdioChannel {
             if tx.send(event).await.is_err() {
                 break; // receiver dropped
             }
+
+            // Wait for the response to be sent before showing next prompt
+            self.response_ready.notified().await;
         }
 
         Ok(())
@@ -82,9 +90,10 @@ impl Channel for StdioChannel {
 
     async fn send(&self, message: &OutboundMessage) -> Result<SendResult> {
         let mut stdout = tokio::io::stdout();
-        stdout.write_all(message.text.as_bytes()).await?;
+        stdout.write_all(message.text.trim_end().as_bytes()).await?;
         stdout.write_all(b"\n").await?;
         stdout.flush().await?;
+        self.response_ready.notify_one();
         Ok(SendResult {
             message_id: "0".into(),
         })

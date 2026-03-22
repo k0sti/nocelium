@@ -1,10 +1,57 @@
 # Nocelium development tasks
 
-default: check
+default:
+    @just --list
 
-# Fast compile check (no codegen)
+# --- Agent ---
+
+# Run agent interactively (stdio)
+agent *ARGS:
+    cargo run -- {{ARGS}}
+
+# Run agent with debug logging
+agent-debug *ARGS:
+    RUST_LOG=nocelium=debug cargo run -- {{ARGS}}
+
+# Run agent with Telegram channel
+agent-telegram *ARGS:
+    cargo run --features telegram -- {{ARGS}}
+
+# --- Service ---
+
+# Install systemd user service
+service-install *ARGS:
+    cargo run -- service install {{ARGS}}
+
+# Start the service
+service-start:
+    systemctl --user enable --now nocelium
+
+# Stop the service
+service-stop:
+    systemctl --user stop nocelium
+
+# Show service status
+service-status:
+    systemctl --user status nocelium
+
+# Follow service logs
+service-logs:
+    journalctl --user -u nocelium -f
+
+# Uninstall the service
+service-uninstall:
+    cargo run -- service uninstall
+
+# --- Development ---
+
+# Fast compile check
 check:
     cargo check --workspace
+
+# Check with Telegram feature
+check-all:
+    cargo check --workspace --features telegram
 
 # Lint with clippy
 lint:
@@ -17,13 +64,9 @@ test:
 # Full CI pipeline
 ci: check lint test
 
-# Run the agent
-run *ARGS:
-    cargo run -- {{ARGS}}
-
-# Run with debug logging
-run-debug *ARGS:
-    RUST_LOG=nocelium=debug cargo run -- {{ARGS}}
+# Build release binary
+build-release:
+    cargo build --release --features telegram
 
 # Check a single crate
 check-crate CRATE:
@@ -32,10 +75,6 @@ check-crate CRATE:
 # Test a single crate
 test-crate CRATE:
     cargo test -p {{CRATE}}
-
-# Build release binary
-build-release:
-    cargo build --release
 
 # Clean build artifacts
 clean:

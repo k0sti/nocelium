@@ -59,14 +59,16 @@ enum ServiceAction {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let is_interactive = std::io::stdin().is_terminal();
+    let default_level = if is_interactive { "warn" } else { "info" };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("nocelium=info".parse()?)
-                .add_directive("nocelium_core=info".parse()?)
-                .add_directive("nocelium_tools=info".parse()?)
-                .add_directive("nocelium_memory=info".parse()?)
-                .add_directive("nocelium_channels=info".parse()?)
+                .add_directive(format!("nocelium={default_level}").parse()?)
+                .add_directive(format!("nocelium_core={default_level}").parse()?)
+                .add_directive(format!("nocelium_tools={default_level}").parse()?)
+                .add_directive(format!("nocelium_memory={default_level}").parse()?)
+                .add_directive(format!("nocelium_channels={default_level}").parse()?)
         )
         .init();
 
