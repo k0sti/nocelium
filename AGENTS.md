@@ -15,6 +15,12 @@ Read `ARCHITECTURE.md` for the full map. Key points:
 - One tool per file in `nocelium-tools`
 - Config in `config/nocelium.toml`
 
+## Documentation
+
+- `ARCHITECTURE.md` — component map, interfaces, data flow. **Update when changing crate boundaries or public traits.**
+- `docs/` — subsystem specs. **Update when changing subsystem behavior.**
+- Do not duplicate design rationale from Obsidian — repo docs cover *how it works now*, not *why* or *what's next*.
+
 ## Conventions
 
 ### Files

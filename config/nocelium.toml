@@ -1,0 +1,48 @@
+# Nocelium Configuration
+
+[identity]
+# Path to store/load the Nostr keypair
+# If not present, a new keypair is generated and saved here
+key_path = "~/.config/nocelium/identity.json"
+
+[agent]
+# System prompt for the agent
+preamble = "You are Nocelium, an AI agent on the Nostr network. You have access to tools and collective memory."
+# Max tokens per response
+max_tokens = 4096
+
+[provider]
+# Provider type: "openrouter", "anthropic", "openai"
+type = "openrouter"
+# Model identifier (OpenRouter format)
+model = "google/gemini-2.0-flash-001"
+# Base URL for OpenAI-compatible API
+base_url = "https://openrouter.ai/api/v1"
+# API key (can also be set via OPENROUTER_API_KEY env var)
+# api_key = ""
+
+[memory]
+# Nomen API endpoint
+# nomen_url = "http://localhost:3000"
+enabled = false
+
+[channels]
+# Enable stdin/stdout channel for testing
+stdio = true
+
+[channels.telegram]
+enabled = false
+# token = ""  # Set via TELEGRAM_BOT_TOKEN env var
+
+[channels.nostr]
+enabled = false
+relays = [
+    "wss://relay.damus.io",
+    "wss://nos.lol",
+]
+
+[tools]
+shell = true
+filesystem = true
+http = true
+web_search = false

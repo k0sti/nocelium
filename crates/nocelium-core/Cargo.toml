@@ -1,0 +1,20 @@
+[package]
+name = "nocelium-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nocelium-tools = { workspace = true }
+nocelium-memory = { workspace = true }
+nocelium-channels = { workspace = true }
+rig-core = { workspace = true }
+nostr-sdk = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+futures = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }

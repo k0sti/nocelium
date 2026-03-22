@@ -1,0 +1,53 @@
+[workspace]
+members = [
+    "crates/nocelium-core",
+    "crates/nocelium-tools",
+    "crates/nocelium-memory",
+    "crates/nocelium-channels",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+nocelium-core = { path = "crates/nocelium-core" }
+nocelium-tools = { path = "crates/nocelium-tools" }
+nocelium-memory = { path = "crates/nocelium-memory" }
+nocelium-channels = { path = "crates/nocelium-channels" }
+
+rig-core = "0.33"
+nostr-sdk = "0.44"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+reqwest = { version = "0.12", features = ["json"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+schemars = "0.8"
+futures = "0.3"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+
+[package]
+name = "nocelium"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nocelium-core = { workspace = true }
+nocelium-tools = { workspace = true }
+nocelium-memory = { workspace = true }
+nocelium-channels = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
