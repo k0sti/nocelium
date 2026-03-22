@@ -43,6 +43,12 @@ service-logs:
 service-uninstall:
     cargo run -- service uninstall
 
+# --- Install ---
+
+# Install nocelium binary to ~/.cargo/bin
+install:
+    cargo install --path . --features telegram
+
 # --- Development ---
 
 # Fast compile check
