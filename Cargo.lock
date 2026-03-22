@@ -1359,6 +1359,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "nocelium-memory",
  "reqwest 0.12.28",
  "rig-core",
  "schemars 0.8.22",
