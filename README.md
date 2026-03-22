@@ -60,5 +60,6 @@ nocelium/
 - [docs/tools.md](docs/tools.md) — tool system
 - [docs/memory.md](docs/memory.md) — Nomen integration
 - [docs/nomen-contract.md](docs/nomen-contract.md) — Nomen API contract & version tracking
+- [docs/dispatch.md](docs/dispatch.md) — event dispatch, handlers, prompt assembly
 - [docs/event-sources.md](docs/event-sources.md) — event sources (cron, webhooks, Nostr)
 - [docs/payments.md](docs/payments.md) — payment integration

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Channels are the bidirectional I/O layer between messaging platforms and the agent loop. Push-based: channels listen in background tasks and push to a shared mpsc queue. The agent loop `select!`s on channels and event sources.
+Channels are the bidirectional I/O layer between messaging platforms and the agent. Push-based: channels listen in background tasks and push `EventEnvelope` to a shared mpsc queue — the same queue used by all event sources. The dispatcher routes events based on dispatch keys.
 
 ## Components
 
@@ -13,7 +13,7 @@ graph TD
     NOSTR["NostrChannel<br/>(nostr-sdk)"]
 
     TRAIT["Channel trait"]
-    INFO["ChannelInfo trait<br/>(optional extension)"]
+    INFO["ChannelInfo trait<br/>(optional)"]
 
     STDIO --> TRAIT
     TG --> TRAIT
@@ -21,9 +21,11 @@ graph TD
     NOSTR --> TRAIT
     NOSTR --> INFO
 
-    TRAIT --> QUEUE["mpsc queue"]
-    QUEUE --> AGENT["Agent Loop<br/>(select!)"]
+    TRAIT --> QUEUE["Shared mpsc<br/>(EventEnvelope)"]
+    QUEUE --> DISPATCH["Dispatcher"]
 ```
+
+Channels share the same `mpsc::Sender<EventEnvelope>` as event sources (cron, webhooks, Nostr subscriptions). See [dispatch.md](dispatch.md) for the unified event model.
 
 ## Channel Trait
 
@@ -33,8 +35,8 @@ pub trait Channel: Send + Sync {
     fn name(&self) -> &str;
     fn capabilities(&self) -> ChannelCapabilities;
 
-    // Inbound
-    async fn listen(&self, tx: mpsc::Sender<InboundMessage>) -> Result<()>;
+    // Inbound — pushes EventEnvelope to shared queue
+    async fn listen(&self, tx: mpsc::Sender<EventEnvelope>) -> Result<()>;
 
     // Outbound
     async fn send(&self, message: &OutboundMessage) -> Result<SendResult>;
@@ -66,50 +68,28 @@ pub trait Channel: Send + Sync {
 }
 ```
 
-All methods except `name()`, `capabilities()`, `listen()`, `send()`, and `health_check()` have default no-op/error implementations. Channels implement only what they support.
+All optional methods have default no-op/error implementations.
 
-## Inbound Message
+## Event Production
 
-```rust
-pub struct InboundMessage {
-    // Identity
-    pub id: String,
-    pub channel: String,
-    pub chat_id: String,
-    pub sender_id: String,
-    pub sender_name: Option<String>,
-    pub sender_handle: Option<String>,
+Channels create `EventEnvelope` with appropriate `kind` and dispatch key for each platform event:
 
-    // Content
-    pub text: String,                        // stripped of mentions
-    pub raw_text: Option<String>,            // original with mentions
+| Platform Event | `kind` | Example dispatch_key |
+|---|---|---|
+| Text message in group | `message` | `telegram:message:-1001234` |
+| Text message in topic | `message` | `telegram:message:-1001234:42` |
+| DM | `message` | `telegram:message:direct:60996061` |
+| Button press | `callback` | `telegram:callback:approve_deploy` |
+| Location update | `location_update` | `telegram:location_update:-1001234:60996061` |
+| Voice message | `voice` | `telegram:voice:-1001234` |
+| Photo/media | `media` | `telegram:media:direct:60996061` |
 
-    // Context
-    pub chat_type: ChatType,                 // Direct, Group, Thread
-    pub group_subject: Option<String>,
-    pub thread_id: Option<String>,
-    pub timestamp: u64,
-
-    // Reply context
-    pub reply_to_id: Option<String>,
-    pub reply_to_text: Option<String>,
-    pub reply_to_sender: Option<String>,
-
-    // Mentions
-    pub mentions: Vec<String>,
-    pub was_mentioned: bool,
-
-    // Media
-    pub attachments: Vec<Attachment>,
-
-    // Location
-    pub location: Option<Location>,
-
-    // Callback (button press)
-    pub callback_data: Option<String>,
-    pub callback_query_id: Option<String>,
-}
-```
+The channel's `listen()` is responsible for:
+1. Receiving platform updates
+2. Filtering by sender allowlist
+3. Downloading media to local paths
+4. Constructing `EventEnvelope` with dispatch key
+5. Pushing to the shared queue
 
 ## Outbound Message
 
@@ -146,26 +126,9 @@ pub struct ChannelCapabilities {
 }
 ```
 
-No `streaming` capability — streaming is done via `send()` + `edit()`. If `edit` is true, the agent loop can stream by sending a placeholder then editing repeatedly.
-
 ## Streaming via Edit
 
-```rust
-if channel.capabilities().edit {
-    let result = channel.send(placeholder).await?;
-    // Throttle: edit every 500ms or 50 chars
-    for tokens in stream {
-        buffer.push_str(&token);
-        channel.edit(chat_id, &result.message_id, &buffer).await.ok();
-    }
-    channel.edit(chat_id, &result.message_id, &final_text).await?;
-} else {
-    // Buffer all, send once
-    channel.send(full_message).await?;
-}
-```
-
-Streaming logic lives in the agent loop, not the channel.
+No dedicated streaming methods. If `capabilities.edit` is true, the agent loop streams by sending a placeholder then editing repeatedly. See [dispatch.md](dispatch.md) for how the agent loop handles this after dispatch.
 
 ## Channel Info (optional extension)
 
@@ -179,39 +142,28 @@ pub trait ChannelInfo: Channel {
 }
 ```
 
-For channels that support metadata queries (Telegram, Nostr). Not required — stdio doesn't implement it.
-
 ## Implementations
 
 ### StdioChannel (implemented)
-- `listen()`: read lines from stdin → InboundMessage with minimal fields
+- `listen()`: read stdin lines → `EventEnvelope { kind: "message", dispatch_key: "stdio:message" }`
 - `send()`: write to stdout
 - Capabilities: `{ chat_types: [Direct] }` — everything else false
 
 ### TelegramChannel (planned)
-- teloxide bot framework, long polling
-- Full capabilities: media, reactions, reply, edit, delete, threads, buttons, polls, typing, pins, location, live location
-- Implements `ChannelInfo` for chat/topic queries
-- Sender allowlisting in `listen()` from Nomen config
-- Rate limiting internal: queue + retry on 429
-- Callback queries: auto-answer in listen(), deliver as InboundMessage with callback_data
+- teloxide, long polling
+- Full capabilities
+- Produces different `kind` values per update type (message, callback, location_update, voice, media)
+- Implements `ChannelInfo`
+- Rate limiting internal
 
 ### NostrChannel (planned)
-- nostr-sdk client
-- NIP-44 encrypted DMs, NIP-29 group chat
-- Capabilities: reply, threads (NIP-29 groups)
-- No edit/delete (Nostr events are immutable)
+- nostr-sdk
+- NIP-44 DMs, NIP-29 groups
+- No edit/delete (immutable events)
 
 ## Rate Limiting
 
-Handled inside each channel implementation, transparent to the agent loop:
-- Telegram: 30 msg/sec across chats, ~1 msg/sec same chat
-- Implementation queues and retries on 429
-- Streaming edit throttle (500ms) in agent loop already respects limits
-
-## Multi-Channel
-
-All channels push to the same `mpsc::Sender<InboundMessage>`. The agent loop holds `Arc<dyn Channel>` refs and routes responses by `InboundMessage.channel` name.
+Internal per-channel. Transparent to caller. Queue + retry on 429.
 
 ## Config
 
@@ -223,7 +175,9 @@ config/channels/nostr → { relays, ... }
 
 ## Crate Placement
 
-- `nocelium-channels/src/lib.rs` — traits, types (`Channel`, `ChannelInfo`, `InboundMessage`, `OutboundMessage`, `ChannelCapabilities`)
+- `nocelium-channels/src/lib.rs` — `Channel` trait, `ChannelInfo` trait, `ChannelCapabilities`, `OutboundMessage`, `SendResult`
 - `nocelium-channels/src/stdio.rs` — StdioChannel
 - `nocelium-channels/src/telegram.rs` — TelegramChannel (planned)
 - `nocelium-channels/src/nostr.rs` — NostrChannel (planned)
+
+Note: `EventEnvelope` lives in `nocelium-core/src/dispatch.rs`, not in the channels crate. Channels depend on core for the envelope type.

@@ -58,10 +58,17 @@ graph TD
 ## Input / Output Model
 
 ```
-Inbound:
-  Channels (conversations)     → Agent Loop (receive)
-  EventSources (cron, webhooks → Event Queue → Agent Loop (select!)
-    Nostr filters, polls)
+Inbound (all produce EventEnvelope):
+  Channels (telegram, nostr, stdio) ─┐
+  CronSource (timers, cron)          ├→ Shared mpsc → Dispatcher → Handler | AgentTurn | Drop
+  WebhookSource (HTTP POST)          │
+  NostrSource (relay subscriptions)  ┘
+
+Dispatch:
+  EventEnvelope.dispatch_key matched against rules in Nomen (config/dispatch/rules)
+  → Handler: direct code execution, no LLM
+  → AgentTurn: build prompt from Nomen topics, call LLM
+  → Drop: ignore
 
 Outbound:
   Agent → Tools (shell, http, nostr_publish, nomen_store, etc.)
@@ -69,19 +76,22 @@ Outbound:
 
 Config + State:
   Bootstrap TOML → identity + Nomen connection only
-  Everything else → Nomen (config/*, cron/*, memories)
+  Everything else → Nomen (config/*, cron/*, prompt/*, memories)
 ```
 
 ## Interfaces
 
 | Boundary | Trait / Type | Called by | Methods | Status |
 |---|---|---|---|---|
-| core → channels | `Channel` trait | agent loop | `listen(tx)`, `send()`, `edit()`, `delete()`, reactions, typing, pins, polls, location | ✅ impl: stdio |
+| core → channels | `Channel` trait | agent loop | `listen(tx: Sender<EventEnvelope>)`, `send()`, `edit()`, `delete()`, reactions, typing, pins, polls, location | ✅ impl: stdio |
 | core → channels | `ChannelInfo` trait (optional) | agent loop | `list_chats()`, `list_topics()`, `get_chat()`, `get_member()` | 🔲 planned |
+| core → dispatch | `Dispatcher` | agent loop | pattern-match dispatch_key → Handler / AgentTurn / Drop | 🔲 planned |
+| core → dispatch | `PromptBuilder` | dispatcher | assemble prompt from Nomen topic lists | 🔲 planned |
+| core → dispatch | `EventHandler` trait | dispatcher | `handle(event, ctx)` for non-LLM processing | 🔲 planned |
 | core → tools | rig `Tool` trait | LLM via rig | `definition()`, `call()` | ✅ impl: shell, read, write |
 | core → memory | `MemoryClient` (wraps `nomen-wire::ReconnectingClient`) | agent loop + tools + event sources | `search()`, `store()`, `get()`, `list()`, `delete()`, `subscribe()` | 🔲 stub |
 | core → LLM | rig `Agent` | agent loop | `prompt()`, `stream_prompt()` | ✅ OpenRouter |
-| core → events | `EventSource` trait | tokio::spawn | `start(tx)` | 🔲 planned |
+| core → events | `EventSource` trait | tokio::spawn | `start(tx: Sender<EventEnvelope>)` | 🔲 planned |
 | binary → core | `Identity`, `build_agent()` | main.rs | direct calls | ✅ |
 
 ## Data Flow (Current)
@@ -106,28 +116,33 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant Ch as Channel
-    participant Src as EventSource (cron/webhook/nostr)
-    participant Core as Agent Loop
-    participant Mem as NomenClient
+    participant Src as Any Source (channel/cron/webhook)
+    participant Q as Shared Queue (EventEnvelope)
+    participant Core as Dispatcher + Agent Loop
+    participant Builder as PromptBuilder
+    participant Nomen as Nomen
     participant LLM as LLM
     participant Tools as Tools
 
-    Note over Core: Startup: read config/* from Nomen, load pinned memories, start event sources
+    Note over Core: Startup: load config, dispatch rules, prompt configs from Nomen
 
-    alt Conversation
-        Ch->>Core: receive() → message
-    else Reactive event
-        Src->>Core: IncomingEvent via mpsc
+    Src->>Q: EventEnvelope
+    Q->>Core: recv()
+    Core->>Core: match dispatch_key against rules
+
+    alt Direct Handler
+        Core->>Core: handler.handle(event) — no LLM
+    else Agent Turn
+        Core->>Builder: build prompt from Nomen topic list
+        Builder->>Nomen: get_batch(prompt parts) + search(context)
+        Nomen->>Builder: memories
+        Builder->>LLM: assembled prompt + message
+        LLM->>Tools: tool calls (shell, http, nomen_store, etc.)
+        Tools->>LLM: results
+        LLM->>Core: response
+    else Drop
+        Core->>Core: ignore
     end
-
-    Core->>Mem: search(context)
-    Mem->>Core: relevant memories
-    Core->>LLM: prompt(message + context)
-    LLM->>Tools: tool calls (shell, http, nomen_store, etc.)
-    Tools->>LLM: results
-    LLM->>Core: response
-    Note over Core: Agent uses tools for all outbound actions
 ```
 
 ## Startup Sequence
@@ -190,7 +205,8 @@ nocelium/
 │   ├── nocelium-memory/            # Nomen client
 │   └── nocelium-channels/          # I/O channels
 ├── docs/
-│   ├── event-sources.md            # unified event source spec (incl. cron)
+│   ├── dispatch.md                  # event dispatch, handlers, prompt assembly
+│   ├── event-sources.md            # event source implementations (cron, webhook, nostr)
 │   ├── memory.md                   # Nomen integration spec
 │   ├── nomen-contract.md           # Nomen API contract + version tracking
 │   ├── channels.md                 # channel system spec

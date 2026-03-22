@@ -2,9 +2,11 @@
 
 ## Overview
 
-Event sources are the unified inbound reactive layer. All non-conversational triggers — timers, webhooks, Nostr subscriptions, polls — are event sources that push into a single queue consumed by the agent loop.
+Event sources produce non-conversational triggers — timers, webhooks, Nostr subscriptions, polls. They push `EventEnvelope` into the same shared queue as channels. The dispatcher routes all events uniformly.
 
 The scheduler is not a separate system. It's just `CronSource` — one implementation of the `EventSource` trait.
+
+See [dispatch.md](dispatch.md) for the unified `EventEnvelope` type and dispatch pipeline.
 
 ## Components
 
@@ -17,17 +19,17 @@ graph TD
         POLL["PollSource<br/>(periodic HTTP GET, future)"]
     end
 
-    QUEUE["Event Queue<br/>(single mpsc)"]
-    AGENT["Agent Loop<br/>(select!)"]
-    CH["Channels<br/>(conversations)"]
+    CH["Channels"]
+    QUEUE["Shared mpsc<br/>(EventEnvelope)"]
+    DISPATCH["Dispatcher"]
     NOMEN["Nomen<br/>(config + cron jobs)"]
 
     CRON --> QUEUE
     WH --> QUEUE
     NS --> QUEUE
     POLL --> QUEUE
-    QUEUE --> AGENT
-    CH --> AGENT
+    CH --> QUEUE
+    QUEUE --> DISPATCH
     NOMEN --> CRON
     NOMEN --> WH
     NOMEN --> NS
@@ -38,21 +40,13 @@ graph TD
 ```rust
 #[async_trait]
 trait EventSource: Send + Sync {
-    /// Start listening, push events to the sender
-    async fn start(&self, tx: mpsc::Sender<IncomingEvent>) -> Result<()>;
+    /// Start listening, push events to the shared queue
+    async fn start(&self, tx: mpsc::Sender<EventEnvelope>) -> Result<()>;
     fn name(&self) -> &str;
-}
-
-struct IncomingEvent {
-    source: String,              // "cron", "webhook", "nostr", "poll"
-    kind: String,                // "heartbeat", "github/push", "dm"
-    payload: String,             // message to inject into agent loop
-    metadata: Option<Value>,     // structured data (optional)
-    received_at: DateTime<Utc>,
 }
 ```
 
-All sources share a single `mpsc::Sender<IncomingEvent>`. The agent loop holds the receiver and `select!`s between the Channel and the event queue.
+Event sources and channels share the same `mpsc::Sender<EventEnvelope>`. No separate queues.
 
 ## CronSource (replaces scheduler)
 
@@ -108,21 +102,10 @@ CronSource loads these at startup via `NomenClient`, tracks `next_run` in memory
 
 ## Agent Loop Integration
 
-```mermaid
-sequenceDiagram
-    participant Src as EventSource (any)
-    participant Q as Event Queue (mpsc)
-    participant Loop as Agent Loop
-    participant LLM as LLM
-    participant Tools as Tools
+All events flow through the dispatcher. See [dispatch.md](dispatch.md) for the full pipeline:
 
-    Src->>Q: IncomingEvent
-    Q->>Loop: recv() via select!
-    Note over Loop: Format as: "[Event: {source}/{kind}] {payload}"
-    Loop->>LLM: prompt(formatted event)
-    LLM->>Tools: decide action (tools for outbound)
-    Tools->>LLM: result
-    LLM->>Loop: done
+```
+EventSource → EventEnvelope → Dispatcher → Handler | AgentTurn | Drop
 ```
 
 ## Nomen Topics
