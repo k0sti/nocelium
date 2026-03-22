@@ -46,6 +46,7 @@ pub fn build_agent(
         .agent(&config.provider.model)
         .preamble(&preamble)
         .max_tokens(config.agent.max_tokens)
+        .default_max_turns(5)
         .tool(ShellTool)
         .tool(ReadFileTool)
         .tool(WriteFileTool);

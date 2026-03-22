@@ -86,8 +86,8 @@ Config + State:
 | core → dispatch | `Dispatcher` | agent loop | pattern-match dispatch_key → Handler / AgentTurn / Drop | 🔲 planned |
 | core → dispatch | `PromptBuilder` | dispatcher | assemble prompt from Nomen topic lists | 🔲 planned |
 | core → dispatch | `EventHandler` trait | dispatcher | `handle(event, ctx)` for non-LLM processing | 🔲 planned |
-| core → tools | rig `Tool` trait | LLM via rig | `definition()`, `call()` | ✅ impl: shell, read, write |
-| core → memory | `MemoryClient` (wraps `nomen-wire::ReconnectingClient`) | agent loop + tools + event sources | `search()`, `store()`, `get()`, `list()`, `delete()`, `subscribe()` | 🔲 stub |
+| core → tools | rig `Tool` trait | LLM via rig | `definition()`, `call()` | ✅ impl: shell, read, write, nomen_search, nomen_store |
+| core → memory | `MemoryClient` (wraps `nomen-wire::ReconnectingClient`) | agent loop + tools | `search()`, `store()`, `get()`, `list()`, `delete()` | ✅ impl |
 | core → LLM | rig `Agent` | agent loop | `prompt()`, `stream_prompt()` | ✅ OpenRouter |
 | core → events | `EventSource` trait | tokio::spawn | `start(tx: Sender<Event>)` | 🔲 planned |
 | binary → core | `Identity`, `build_agent()` | main.rs | direct calls | ✅ |
