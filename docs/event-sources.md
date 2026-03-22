@@ -2,11 +2,11 @@
 
 ## Overview
 
-Event sources produce non-conversational triggers — timers, webhooks, Nostr subscriptions, polls. They push `EventEnvelope` into the same shared queue as channels. The dispatcher routes all events uniformly.
+Event sources produce non-conversational triggers — timers, webhooks, Nostr subscriptions, polls. They push `Event` into the same shared queue as channels. The dispatcher routes all events uniformly.
 
 The scheduler is not a separate system. It's just `CronSource` — one implementation of the `EventSource` trait.
 
-See [dispatch.md](dispatch.md) for the unified `EventEnvelope` type and dispatch pipeline.
+See [dispatch.md](dispatch.md) for the `Event` type and dispatch pipeline.
 
 ## Components
 
@@ -20,7 +20,7 @@ graph TD
     end
 
     CH["Channels"]
-    QUEUE["Shared mpsc<br/>(EventEnvelope)"]
+    QUEUE["Shared mpsc<br/>(Event)"]
     DISPATCH["Dispatcher"]
     NOMEN["Nomen<br/>(config + cron jobs)"]
 
@@ -41,12 +41,12 @@ graph TD
 #[async_trait]
 trait EventSource: Send + Sync {
     /// Start listening, push events to the shared queue
-    async fn start(&self, tx: mpsc::Sender<EventEnvelope>) -> Result<()>;
+    async fn start(&self, tx: mpsc::Sender<Event>) -> Result<()>;
     fn name(&self) -> &str;
 }
 ```
 
-Event sources and channels share the same `mpsc::Sender<EventEnvelope>`. No separate queues.
+Event sources and channels share the same `mpsc::Sender<Event>`. No separate queues.
 
 ## CronSource (replaces scheduler)
 
@@ -105,7 +105,7 @@ CronSource loads these at startup via `NomenClient`, tracks `next_run` in memory
 All events flow through the dispatcher. See [dispatch.md](dispatch.md) for the full pipeline:
 
 ```
-EventSource → EventEnvelope → Dispatcher → Handler | AgentTurn | Drop
+EventSource → Event → Dispatcher → Handler | AgentTurn | Drop
 ```
 
 ## Nomen Topics

@@ -25,7 +25,7 @@ graph TD
     QUEUE --> DISPATCH["Dispatcher"]
 ```
 
-Channels share the same `mpsc::Sender<EventEnvelope>` as event sources (cron, webhooks, Nostr subscriptions). See [dispatch.md](dispatch.md) for the unified event model.
+Channels share the same `mpsc::Sender<Event>` as event sources. See [dispatch.md](dispatch.md) for the `Event` type and dispatch pipeline.
 
 ## Channel Trait
 
@@ -35,8 +35,8 @@ pub trait Channel: Send + Sync {
     fn name(&self) -> &str;
     fn capabilities(&self) -> ChannelCapabilities;
 
-    // Inbound — pushes EventEnvelope to shared queue
-    async fn listen(&self, tx: mpsc::Sender<EventEnvelope>) -> Result<()>;
+    // Inbound — pushes Event to shared queue
+    async fn listen(&self, tx: mpsc::Sender<Event>) -> Result<()>;
 
     // Outbound
     async fn send(&self, message: &OutboundMessage) -> Result<SendResult>;
@@ -72,23 +72,24 @@ All optional methods have default no-op/error implementations.
 
 ## Event Production
 
-Channels create `EventEnvelope` with appropriate `kind` and dispatch key for each platform event:
+Channels create `Event` with typed `Payload` for each platform update:
 
-| Platform Event | `kind` | Example dispatch_key |
+| Platform Event | Payload variant | Example dispatch_key |
 |---|---|---|
-| Text message in group | `message` | `telegram:message:-1001234` |
-| Text message in topic | `message` | `telegram:message:-1001234:42` |
-| DM | `message` | `telegram:message:direct:60996061` |
-| Button press | `callback` | `telegram:callback:approve_deploy` |
-| Location update | `location_update` | `telegram:location_update:-1001234:60996061` |
-| Voice message | `voice` | `telegram:voice:-1001234` |
-| Photo/media | `media` | `telegram:media:direct:60996061` |
+| Text message | `Payload::Message` | `telegram:message:-1001234` |
+| Text in topic | `Payload::Message` | `telegram:message:-1001234:42` |
+| DM | `Payload::Message` | `telegram:message:direct:60996061` |
+| Button press | `Payload::Callback` | `telegram:callback:approve_deploy` |
+| Location update | `Payload::LocationUpdate` | `telegram:location:-1001234:60996061` |
+| Photo/media only | `Payload::Media` | `telegram:media:-1001234` |
+
+Voice/media with text are `Payload::Message` with attachments.
 
 The channel's `listen()` is responsible for:
 1. Receiving platform updates
 2. Filtering by sender allowlist
 3. Downloading media to local paths
-4. Constructing `EventEnvelope` with dispatch key
+4. Constructing `Event` with typed payload
 5. Pushing to the shared queue
 
 ## Outbound Message
@@ -145,7 +146,7 @@ pub trait ChannelInfo: Channel {
 ## Implementations
 
 ### StdioChannel (implemented)
-- `listen()`: read stdin lines → `EventEnvelope { kind: "message", dispatch_key: "stdio:message" }`
+- `listen()`: read stdin lines → `Event { payload: Payload::Message(..), key: "stdio:message" }`
 - `send()`: write to stdout
 - Capabilities: `{ chat_types: [Direct] }` — everything else false
 
@@ -180,4 +181,4 @@ config/channels/nostr → { relays, ... }
 - `nocelium-channels/src/telegram.rs` — TelegramChannel (planned)
 - `nocelium-channels/src/nostr.rs` — NostrChannel (planned)
 
-Note: `EventEnvelope` lives in `nocelium-core/src/dispatch.rs`, not in the channels crate. Channels depend on core for the envelope type.
+Note: `Event`, `Source`, `Payload` live in `nocelium-core/src/event.rs`. Channels depend on core for these types.

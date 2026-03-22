@@ -2,11 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement TelegramChannel as a push-based channel with full capabilities (send, edit, delete, reactions, typing, pins, polls, buttons, location) following the spec in `docs/channels.md`.
+**Goal:** Implement TelegramChannel as a push-based channel producing `EventEnvelope` events through the unified dispatch system, with full Telegram capabilities (send, edit, delete, reactions, typing, pins, polls, buttons, location).
 
-**Architecture:** Evolve the Channel trait from pull-based (`receive()`) to push-based (`listen(tx)` with mpsc queue). TelegramChannel uses teloxide 0.17 with long polling via `Dispatcher`. Agent loop changes to `select!` on inbound message queue. StdioChannel updated for the new trait. Telegram behind a cargo feature flag.
+**Architecture:** Channels push `EventEnvelope` to a shared mpsc queue (same queue used by all event sources). Each envelope has a hierarchical dispatch key (`telegram:message:direct:12345`). The agent loop receives envelopes, matches dispatch rules, and routes to handlers or LLM agent turns. For this implementation, we use a simplified dispatcher (no Nomen yet — hardcode default AgentTurn for all events). TelegramChannel uses teloxide 0.17 with long polling. Telegram behind a cargo feature flag.
 
-**Tech Stack:** teloxide 0.17, tokio mpsc, thiserror, async-trait
+**Dependency note:** The spec places `EventEnvelope` in `nocelium-core/src/dispatch.rs`, but core already depends on channels. To avoid circular deps, `EventEnvelope` and `EventSource` live in `nocelium-channels/src/types.rs`. Core imports them from channels. Dispatch logic (rules, matching) lives in core.
+
+**Tech Stack:** teloxide 0.17, tokio mpsc, thiserror, async-trait, glob pattern matching
 
 ---
 
@@ -14,16 +16,18 @@
 
 | Action | File | Responsibility |
 |--------|------|---------------|
-| Create | `crates/nocelium-channels/src/error.rs` | Channel error types via thiserror |
-| Create | `crates/nocelium-channels/src/types.rs` | InboundMessage, OutboundMessage, ChannelCapabilities, SendResult, ChatType, Attachment, Button, Poll, Location, ChatInfo, TopicInfo, MemberInfo |
+| Create | `crates/nocelium-channels/src/error.rs` | Channel error types (thiserror) |
+| Create | `crates/nocelium-channels/src/types.rs` | EventEnvelope, EventSource, OutboundMessage, ChannelCapabilities, SendResult, ChatType, Attachment, Button, Poll, Location, ChatInfo, TopicInfo, MemberInfo |
 | Rewrite | `crates/nocelium-channels/src/lib.rs` | Channel + ChannelInfo traits, re-exports |
-| Rewrite | `crates/nocelium-channels/src/stdio.rs` | StdioChannel updated for new trait |
+| Rewrite | `crates/nocelium-channels/src/stdio.rs` | StdioChannel (push-based, produces EventEnvelope) |
 | Create | `crates/nocelium-channels/src/telegram.rs` | TelegramChannel with teloxide |
+| Create | `crates/nocelium-core/src/dispatch.rs` | DispatchRule, DispatchAction, Dispatcher (pattern matching) |
 | Modify | `crates/nocelium-channels/Cargo.toml` | Add teloxide, thiserror deps behind feature flag |
 | Modify | `Cargo.toml` (workspace root) | Add teloxide workspace dep, enable telegram feature |
 | Modify | `crates/nocelium-core/src/config.rs` | Add `allowed_senders` to TelegramConfig |
-| Rewrite | `crates/nocelium-core/src/agent.rs` | Push-based agent loop with mpsc + channel routing |
-| Modify | `src/main.rs` | Start telegram channel if configured |
+| Rewrite | `crates/nocelium-core/src/agent.rs` | Dispatch-based agent loop |
+| Modify | `crates/nocelium-core/src/lib.rs` | Add `pub mod dispatch;` |
+| Modify | `src/main.rs` | Start telegram channel, build dispatcher |
 
 ---
 
@@ -70,8 +74,7 @@ nocelium-channels = { workspace = true, features = ["telegram"] }
 
 - [ ] **Step 4: Run `just check`**
 
-Run: `just check`
-Expected: compiles (no new code yet, just deps)
+Expected: compiles
 
 - [ ] **Step 5: Commit**
 
@@ -86,7 +89,7 @@ git commit -m "feat(channels): add teloxide dependency behind telegram feature f
 
 **Files:**
 - Create: `crates/nocelium-channels/src/error.rs`
-- Modify: `crates/nocelium-channels/src/lib.rs` (add `pub mod error;`)
+- Modify: `crates/nocelium-channels/src/lib.rs` (add module)
 
 - [ ] **Step 1: Create error.rs**
 
@@ -117,13 +120,9 @@ pub enum ChannelError {
 pub type Result<T> = std::result::Result<T, ChannelError>;
 ```
 
-- [ ] **Step 2: Add `pub mod error;` to lib.rs temporarily**
-
-Just add `pub mod error;` at the top of `lib.rs`. We'll rewrite `lib.rs` fully in Task 3.
+- [ ] **Step 2: Add `pub mod error;` to lib.rs**
 
 - [ ] **Step 3: Run `just check`**
-
-Expected: compiles
 
 - [ ] **Step 4: Commit**
 
@@ -134,36 +133,48 @@ git commit -m "feat(channels): add channel error types"
 
 ---
 
-### Task 3: Message Types
+### Task 3: Types (EventEnvelope + Outbound)
 
 **Files:**
 - Create: `crates/nocelium-channels/src/types.rs`
 
-- [ ] **Step 1: Create types.rs with all message/capability types**
+- [ ] **Step 1: Create types.rs**
+
+Contains `EventEnvelope`, `EventSource`, `OutboundMessage`, `SendResult`, `ChannelCapabilities`, and all supporting types. `EventEnvelope` is the unified event type — channels, cron, webhooks, Nostr subscriptions all produce this. Each envelope has a `dispatch_key` computed at creation time.
 
 ```rust
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-/// Direction of a message into the agent loop
+// --- EventEnvelope (unified inbound event) ---
+
 #[derive(Debug, Clone)]
-pub struct InboundMessage {
-    // Identity
-    pub id: String,
-    pub channel: String,
-    pub chat_id: String,
-    pub sender_id: String,
+pub struct EventEnvelope {
+    // Dispatch
+    pub dispatch_key: String,
+
+    // Source
+    pub source: EventSource,
+    pub kind: String, // "message", "callback", "location_update", "voice", "media", "cron", "webhook"
+
+    // Channel context (present for channel-originated events)
+    pub channel: Option<String>,   // "telegram", "nostr", "stdio"
+    pub chat_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub sender_id: Option<String>,
     pub sender_name: Option<String>,
     pub sender_handle: Option<String>,
+    pub chat_type: Option<ChatType>,
+    pub group_subject: Option<String>,
 
     // Content
-    pub text: String,
-    pub raw_text: Option<String>,
-
-    // Context
-    pub chat_type: ChatType,
-    pub group_subject: Option<String>,
-    pub thread_id: Option<String>,
-    pub timestamp: u64,
+    pub text: Option<String>,       // message text (stripped of mentions)
+    pub raw_text: Option<String>,   // original with mentions
+    pub location: Option<Location>,
+    pub callback_data: Option<String>,
+    pub callback_query_id: Option<String>,
+    pub attachments: Vec<Attachment>,
+    pub metadata: Option<Value>,    // structured data (webhook payload, etc.)
 
     // Reply context
     pub reply_to_id: Option<String>,
@@ -174,18 +185,58 @@ pub struct InboundMessage {
     pub mentions: Vec<String>,
     pub was_mentioned: bool,
 
-    // Media
-    pub attachments: Vec<Attachment>,
-
-    // Location
-    pub location: Option<Location>,
-
-    // Callback (button press)
-    pub callback_data: Option<String>,
-    pub callback_query_id: Option<String>,
+    // Timing
+    pub timestamp: u64,
+    pub message_id: Option<String>, // platform message ID (for reactions, replies)
 }
 
-/// Direction of a message out of the agent loop
+impl EventEnvelope {
+    /// Compute the hierarchical dispatch key from envelope fields.
+    pub fn compute_dispatch_key(
+        source: &EventSource,
+        kind: &str,
+        chat_type: Option<&ChatType>,
+        chat_id: Option<&str>,
+        sender_id: Option<&str>,
+        thread_id: Option<&str>,
+        callback_data: Option<&str>,
+    ) -> String {
+        match source {
+            EventSource::Channel(ch) => match (chat_type, chat_id, sender_id) {
+                (Some(ChatType::Direct), _, Some(sender)) => {
+                    format!("{ch}:{kind}:direct:{sender}")
+                }
+                (_, Some(chat), _) => match thread_id {
+                    Some(thread) => format!("{ch}:{kind}:{chat}:{thread}"),
+                    None => format!("{ch}:{kind}:{chat}"),
+                },
+                _ => {
+                    // For callbacks, include the callback data prefix
+                    if kind == "callback" {
+                        if let Some(data) = callback_data {
+                            return format!("{ch}:callback:{data}");
+                        }
+                    }
+                    format!("{ch}:{kind}")
+                }
+            },
+            EventSource::Cron(id) => format!("cron:{id}"),
+            EventSource::Webhook(name) => format!("webhook:{name}"),
+            EventSource::Nostr(filter) => format!("nostr:{filter}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum EventSource {
+    Channel(String),  // "telegram", "nostr", "stdio"
+    Cron(String),     // task id
+    Webhook(String),  // source name
+    Nostr(String),    // filter id
+}
+
+// --- Outbound ---
+
 #[derive(Debug, Clone)]
 pub struct OutboundMessage {
     pub chat_id: String,
@@ -197,12 +248,13 @@ pub struct OutboundMessage {
     pub silent: bool,
 }
 
-/// Result from sending a message
 #[derive(Debug, Clone)]
 pub struct SendResult {
     pub message_id: String,
     pub chat_id: String,
 }
+
+// --- Capabilities ---
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChatType {
@@ -210,6 +262,26 @@ pub enum ChatType {
     Group,
     Thread,
 }
+
+#[derive(Debug, Clone)]
+pub struct ChannelCapabilities {
+    pub chat_types: Vec<ChatType>,
+    pub media: bool,
+    pub reactions: bool,
+    pub reply: bool,
+    pub edit: bool,
+    pub delete: bool,
+    pub threads: bool,
+    pub buttons: bool,
+    pub polls: bool,
+    pub typing: bool,
+    pub pins: bool,
+    pub voice: bool,
+    pub location: bool,
+    pub live_location: bool,
+}
+
+// --- Attachments ---
 
 #[derive(Debug, Clone)]
 pub struct Attachment {
@@ -246,6 +318,8 @@ pub enum AttachmentData {
     Bytes { data: Vec<u8>, filename: String },
 }
 
+// --- Buttons / Polls / Location ---
+
 #[derive(Debug, Clone)]
 pub struct Button {
     pub text: String,
@@ -264,24 +338,6 @@ pub struct Poll {
 pub struct Location {
     pub latitude: f64,
     pub longitude: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct ChannelCapabilities {
-    pub chat_types: Vec<ChatType>,
-    pub media: bool,
-    pub reactions: bool,
-    pub reply: bool,
-    pub edit: bool,
-    pub delete: bool,
-    pub threads: bool,
-    pub buttons: bool,
-    pub polls: bool,
-    pub typing: bool,
-    pub pins: bool,
-    pub voice: bool,
-    pub location: bool,
-    pub live_location: bool,
 }
 
 // --- ChannelInfo types ---
@@ -313,13 +369,11 @@ pub struct MemberInfo {
 
 - [ ] **Step 3: Run `just check`**
 
-Expected: compiles (warns about unused, that's fine)
-
 - [ ] **Step 4: Commit**
 
 ```bash
 git add crates/nocelium-channels/src/types.rs crates/nocelium-channels/src/lib.rs
-git commit -m "feat(channels): add channel message and capability types"
+git commit -m "feat(channels): add EventEnvelope and channel types"
 ```
 
 ---
@@ -331,12 +385,14 @@ git commit -m "feat(channels): add channel message and capability types"
 
 - [ ] **Step 1: Rewrite lib.rs with new Channel + ChannelInfo traits**
 
+Key change from previous: `listen()` takes `mpsc::Sender<EventEnvelope>` (not InboundMessage). All optional methods have default no-op/error implementations.
+
 ```rust
 //! Nocelium Channels — Message I/O abstraction
 //!
-//! Channels provide the bidirectional interface between external messaging
-//! systems (Telegram, Nostr, stdio) and the agent loop. Push-based: channels
-//! listen in background tasks and push to a shared mpsc queue.
+//! Channels are the bidirectional I/O layer between messaging platforms and the
+//! agent. Push-based: channels listen in background tasks and push EventEnvelope
+//! to a shared mpsc queue — the same queue used by all event sources.
 
 pub mod error;
 pub mod stdio;
@@ -352,20 +408,18 @@ use tokio::sync::mpsc;
 
 /// Bidirectional message channel.
 ///
-/// Push-based: `listen()` spawns a background task that pushes inbound messages
-/// to the provided mpsc sender. The agent loop selects on the receiver.
-///
-/// All methods except `name()`, `capabilities()`, `listen()`, `send()`, and
-/// `health_check()` have default no-op/error implementations.
+/// Push-based: `listen()` spawns a background task that pushes `EventEnvelope`
+/// to the shared queue. The dispatcher routes events by dispatch key.
 #[async_trait]
 pub trait Channel: Send + Sync {
     fn name(&self) -> &str;
     fn capabilities(&self) -> ChannelCapabilities;
 
-    // Inbound
-    async fn listen(&self, tx: mpsc::Sender<InboundMessage>) -> Result<()>;
+    /// Start listening. Spawns a background task that pushes EventEnvelope
+    /// to the shared queue (same queue used by cron, webhooks, etc.).
+    async fn listen(&self, tx: mpsc::Sender<EventEnvelope>) -> Result<()>;
 
-    // Outbound
+    /// Send an outbound message.
     async fn send(&self, message: &OutboundMessage) -> Result<SendResult>;
 
     async fn edit(&self, _chat_id: &str, _message_id: &str, _text: &str) -> Result<()> {
@@ -376,7 +430,6 @@ pub trait Channel: Send + Sync {
         Err(ChannelError::NotSupported("delete".into()))
     }
 
-    // Reactions
     async fn add_reaction(
         &self, _chat_id: &str, _message_id: &str, _emoji: &str,
     ) -> Result<()> {
@@ -389,16 +442,14 @@ pub trait Channel: Send + Sync {
         Err(ChannelError::NotSupported("remove_reaction".into()))
     }
 
-    // Typing
     async fn start_typing(&self, _chat_id: &str) -> Result<()> {
         Err(ChannelError::NotSupported("start_typing".into()))
     }
 
     async fn stop_typing(&self, _chat_id: &str) -> Result<()> {
-        Ok(()) // no-op by default
+        Ok(())
     }
 
-    // Pins
     async fn pin_message(&self, _chat_id: &str, _message_id: &str) -> Result<()> {
         Err(ChannelError::NotSupported("pin_message".into()))
     }
@@ -407,12 +458,10 @@ pub trait Channel: Send + Sync {
         Err(ChannelError::NotSupported("unpin_message".into()))
     }
 
-    // Polls
     async fn send_poll(&self, _chat_id: &str, _poll: &Poll) -> Result<SendResult> {
         Err(ChannelError::NotSupported("send_poll".into()))
     }
 
-    // Location
     async fn send_location(
         &self, _chat_id: &str, _lat: f64, _lon: f64,
         _live_period: Option<u32>, _reply_to: Option<&str>,
@@ -430,7 +479,6 @@ pub trait Channel: Send + Sync {
         Err(ChannelError::NotSupported("stop_location".into()))
     }
 
-    // Health
     async fn health_check(&self) -> bool {
         true
     }
@@ -446,15 +494,15 @@ pub trait ChannelInfo: Channel {
 }
 ```
 
-- [ ] **Step 2: Run `just check`**
+- [ ] **Step 2: Run `cargo check -p nocelium-channels`**
 
-Expected: fails — StdioChannel doesn't implement new trait yet. That's expected, we fix it next task.
+Expected: channels crate compiles. StdioChannel will fail (old trait). Fix in next task.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add crates/nocelium-channels/src/lib.rs
-git commit -m "feat(channels): rewrite Channel trait to push-based architecture"
+git commit -m "feat(channels): rewrite Channel trait for EventEnvelope dispatch"
 ```
 
 ---
@@ -464,9 +512,9 @@ git commit -m "feat(channels): rewrite Channel trait to push-based architecture"
 **Files:**
 - Rewrite: `crates/nocelium-channels/src/stdio.rs`
 
-- [ ] **Step 1: Rewrite stdio.rs for new Channel trait**
+- [ ] **Step 1: Rewrite stdio.rs**
 
-StdioChannel spawns a tokio task in `listen()` that reads stdin lines and pushes `InboundMessage` to the mpsc sender. `send()` writes to stdout. Capabilities: `{ chat_types: [Direct] }`, everything else false.
+StdioChannel now produces `EventEnvelope` with `dispatch_key: "stdio:message"`, `kind: "message"`, `source: EventSource::Channel("stdio")`.
 
 ```rust
 use std::sync::Arc;
@@ -477,7 +525,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::{
-    Channel, ChannelCapabilities, ChannelError, ChatType, InboundMessage,
+    Channel, ChannelCapabilities, ChannelError, ChatType, EventEnvelope, EventSource,
     OutboundMessage, Result, SendResult,
 };
 
@@ -518,7 +566,7 @@ impl Channel for StdioChannel {
         }
     }
 
-    async fn listen(&self, tx: mpsc::Sender<InboundMessage>) -> Result<()> {
+    async fn listen(&self, tx: mpsc::Sender<EventEnvelope>) -> Result<()> {
         let writer = self.writer.clone();
 
         tokio::spawn(async move {
@@ -526,7 +574,6 @@ impl Channel for StdioChannel {
             let mut counter: u64 = 0;
 
             loop {
-                // Print prompt
                 {
                     let mut w = writer.lock().await;
                     let _ = w.write_all(b"\n> ").await;
@@ -535,7 +582,7 @@ impl Channel for StdioChannel {
 
                 let mut line = String::new();
                 match reader.read_line(&mut line).await {
-                    Ok(0) => break, // EOF
+                    Ok(0) => break,
                     Ok(_) => {
                         let text = line.trim().to_string();
                         if text.is_empty() {
@@ -547,32 +594,41 @@ impl Channel for StdioChannel {
                             .unwrap_or_default()
                             .as_secs();
 
-                        let msg = InboundMessage {
-                            id: counter.to_string(),
-                            channel: "stdio".into(),
-                            chat_id: "stdio".into(),
-                            sender_id: "local".into(),
+                        let source = EventSource::Channel("stdio".into());
+                        let dispatch_key = EventEnvelope::compute_dispatch_key(
+                            &source, "message", None, None, None, None, None,
+                        );
+
+                        let envelope = EventEnvelope {
+                            dispatch_key,
+                            source,
+                            kind: "message".into(),
+                            channel: Some("stdio".into()),
+                            chat_id: Some("stdio".into()),
+                            thread_id: None,
+                            sender_id: Some("local".into()),
                             sender_name: None,
                             sender_handle: None,
-                            text,
-                            raw_text: None,
-                            chat_type: ChatType::Direct,
+                            chat_type: Some(ChatType::Direct),
                             group_subject: None,
-                            thread_id: None,
-                            timestamp: now,
+                            text: Some(text),
+                            raw_text: None,
+                            location: None,
+                            callback_data: None,
+                            callback_query_id: None,
+                            attachments: vec![],
+                            metadata: None,
                             reply_to_id: None,
                             reply_to_text: None,
                             reply_to_sender: None,
                             mentions: vec![],
                             was_mentioned: false,
-                            attachments: vec![],
-                            location: None,
-                            callback_data: None,
-                            callback_query_id: None,
+                            timestamp: now,
+                            message_id: Some(counter.to_string()),
                         };
 
-                        if tx.send(msg).await.is_err() {
-                            break; // receiver dropped
+                        if tx.send(envelope).await.is_err() {
+                            break;
                         }
                     }
                     Err(_) => break,
@@ -585,10 +641,18 @@ impl Channel for StdioChannel {
 
     async fn send(&self, message: &OutboundMessage) -> Result<SendResult> {
         let mut w = self.writer.lock().await;
-        w.write_all(b"\n").await.map_err(|e| ChannelError::SendFailed(e.to_string()))?;
-        w.write_all(message.text.as_bytes()).await.map_err(|e| ChannelError::SendFailed(e.to_string()))?;
-        w.write_all(b"\n").await.map_err(|e| ChannelError::SendFailed(e.to_string()))?;
-        w.flush().await.map_err(|e| ChannelError::SendFailed(e.to_string()))?;
+        w.write_all(b"\n")
+            .await
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
+        w.write_all(message.text.as_bytes())
+            .await
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
+        w.write_all(b"\n")
+            .await
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
+        w.flush()
+            .await
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
 
         Ok(SendResult {
             message_id: "0".into(),
@@ -598,15 +662,15 @@ impl Channel for StdioChannel {
 }
 ```
 
-- [ ] **Step 2: Run `just check`**
+- [ ] **Step 2: Run `cargo check -p nocelium-channels`**
 
-Expected: channels crate compiles. Core crate will fail (agent.rs uses old trait). That's expected.
+Expected: channels crate compiles fully.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add crates/nocelium-channels/src/stdio.rs
-git commit -m "feat(channels): update StdioChannel for push-based Channel trait"
+git commit -m "feat(channels): update StdioChannel for EventEnvelope dispatch"
 ```
 
 ---
@@ -618,25 +682,23 @@ git commit -m "feat(channels): update StdioChannel for push-based Channel trait"
 
 - [ ] **Step 1: Create telegram.rs**
 
-This is the core implementation. TelegramChannel wraps a `teloxide::Bot`, starts long polling in `listen()`, and implements full capabilities.
+TelegramChannel produces different `EventEnvelope.kind` values per Telegram update type: `"message"`, `"callback"`, `"location_update"`, `"voice"`, `"media"`. Dispatch keys follow the spec format (e.g., `telegram:message:direct:60996061`, `telegram:message:-1001234:42`). Includes sender allowlisting, callback auto-answer, mention detection, and full Channel trait + ChannelInfo implementation.
 
 ```rust
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use teloxide::prelude::*;
 use teloxide::types::{
     ChatAction, InlineKeyboardButton, InlineKeyboardMarkup, InputPollOption,
-    MessageId, ParseMode, ReactionType, ReactionEmoji,
+    MessageId, ParseMode, ReactionEmoji, ReactionType,
 };
 use tokio::sync::mpsc;
-use tracing;
 
 use crate::{
     Channel, ChannelCapabilities, ChannelError, ChannelInfo, ChatInfo, ChatType,
-    InboundMessage, Location, MemberInfo, OutboundMessage, Poll as ChannelPoll,
-    Result, SendResult, TopicInfo,
+    EventEnvelope, EventSource, Location, MemberInfo, OutboundMessage,
+    Poll as ChannelPoll, Result, SendResult, TopicInfo,
 };
 
 pub struct TelegramChannel {
@@ -645,7 +707,6 @@ pub struct TelegramChannel {
 }
 
 impl TelegramChannel {
-    /// Create from explicit token.
     pub fn new(token: &str, allowed_senders: Vec<String>) -> Self {
         Self {
             bot: Bot::new(token),
@@ -653,32 +714,11 @@ impl TelegramChannel {
         }
     }
 
-    /// Create from TELEGRAM_BOT_TOKEN env var.
     pub fn from_env(allowed_senders: Vec<String>) -> Self {
         Self {
             bot: Bot::from_env(),
             allowed_senders,
         }
-    }
-
-    fn is_sender_allowed(&self, user: &teloxide::types::User) -> bool {
-        if self.allowed_senders.is_empty() {
-            return true; // no allowlist = allow all
-        }
-        let uid = user.id.0.to_string();
-        if self.allowed_senders.contains(&uid) {
-            return true;
-        }
-        if let Some(ref username) = user.username {
-            if self.allowed_senders.contains(username) {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn bot_clone(&self) -> Bot {
-        self.bot.clone()
     }
 }
 
@@ -697,9 +737,104 @@ fn tg_chat_type(chat: &teloxide::types::Chat) -> ChatType {
     }
 }
 
-fn msg_to_inbound(msg: &Message) -> Option<InboundMessage> {
-    let text = msg.text().or_else(|| msg.caption()).unwrap_or("").to_string();
+fn is_allowed(user: &teloxide::types::User, allowed: &[String]) -> bool {
+    if allowed.is_empty() {
+        return true;
+    }
+    let uid = user.id.0.to_string();
+    if allowed.contains(&uid) {
+        return true;
+    }
+    if let Some(ref username) = user.username {
+        if allowed.contains(username) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Detect if the bot was mentioned in message entities.
+fn detect_bot_mention(msg: &Message, bot_username: &Option<String>) -> (Vec<String>, bool) {
+    let mut mentions = Vec::new();
+    let mut was_mentioned = false;
+
+    if let Some(entities) = msg.entities() {
+        let text = msg.text().unwrap_or("");
+        for entity in entities {
+            if entity.kind == teloxide::types::MessageEntityKind::Mention {
+                let start = entity.offset;
+                let end = start + entity.length;
+                if let Some(mention) = text.get(start..end) {
+                    let clean = mention.trim_start_matches('@').to_string();
+                    if let Some(ref bot_name) = bot_username {
+                        if clean.eq_ignore_ascii_case(bot_name) {
+                            was_mentioned = true;
+                        }
+                    }
+                    mentions.push(clean);
+                }
+            }
+        }
+    }
+
+    (mentions, was_mentioned)
+}
+
+/// Strip bot mention from message text.
+fn strip_bot_mention(text: &str, bot_username: &Option<String>) -> String {
+    if let Some(ref name) = bot_username {
+        let pattern = format!("@{name}");
+        text.replace(&pattern, "")
+            .replace(&pattern.to_lowercase(), "")
+            .trim()
+            .to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+/// Determine event kind from a Telegram message.
+fn event_kind_for_msg(msg: &Message) -> &'static str {
+    if msg.location().is_some() {
+        "location_update"
+    } else if msg.voice().is_some() {
+        "voice"
+    } else if msg.photo().is_some()
+        || msg.video().is_some()
+        || msg.document().is_some()
+        || msg.animation().is_some()
+    {
+        "media"
+    } else {
+        "message"
+    }
+}
+
+fn msg_to_envelope(msg: &Message, bot_username: &Option<String>) -> Option<EventEnvelope> {
     let from = msg.from.as_ref()?;
+    let raw_text = msg.text().or_else(|| msg.caption()).map(|t| t.to_string());
+    let kind = event_kind_for_msg(msg);
+
+    let chat_type = tg_chat_type(&msg.chat);
+    let chat_id = msg.chat.id.0.to_string();
+    let sender_id = from.id.0.to_string();
+    let thread_id = msg.thread_id.map(|t| t.0.to_string());
+
+    let (mentions, was_mentioned) = detect_bot_mention(msg, bot_username);
+    let text = raw_text
+        .as_deref()
+        .map(|t| strip_bot_mention(t, bot_username));
+
+    let source = EventSource::Channel("telegram".into());
+    let dispatch_key = EventEnvelope::compute_dispatch_key(
+        &source,
+        kind,
+        Some(&chat_type),
+        Some(&chat_id),
+        Some(&sender_id),
+        thread_id.as_deref(),
+        None,
+    );
 
     let sender_name = {
         let first = &from.first_name;
@@ -714,45 +849,42 @@ fn msg_to_inbound(msg: &Message) -> Option<InboundMessage> {
         longitude: loc.longitude,
     });
 
-    let reply_to_id = msg.reply_to_message().map(|r| r.id.0.to_string());
-    let reply_to_text = msg
-        .reply_to_message()
-        .and_then(|r| r.text().map(|t| t.to_string()));
-    let reply_to_sender = msg
-        .reply_to_message()
-        .and_then(|r| r.from.as_ref().map(|u| u.id.0.to_string()));
-
-    let thread_id = msg.thread_id.map(|t| t.0.to_string());
-
-    Some(InboundMessage {
-        id: msg.id.0.to_string(),
-        channel: "telegram".into(),
-        chat_id: msg.chat.id.0.to_string(),
-        sender_id: from.id.0.to_string(),
+    Some(EventEnvelope {
+        dispatch_key,
+        source,
+        kind: kind.into(),
+        channel: Some("telegram".into()),
+        chat_id: Some(chat_id),
+        thread_id,
+        sender_id: Some(sender_id),
         sender_name,
         sender_handle: from.username.clone(),
-        text,
-        raw_text: msg.text().map(|t| t.to_string()),
-        chat_type: tg_chat_type(&msg.chat),
+        chat_type: Some(chat_type),
         group_subject: msg.chat.title().map(|t| t.to_string()),
-        thread_id,
-        timestamp: now_secs(),
-        reply_to_id,
-        reply_to_text,
-        reply_to_sender,
-        mentions: vec![],
-        was_mentioned: false,
-        attachments: vec![],
+        text,
+        raw_text,
         location,
         callback_data: None,
         callback_query_id: None,
+        attachments: vec![],
+        metadata: None,
+        reply_to_id: msg.reply_to_message().map(|r| r.id.0.to_string()),
+        reply_to_text: msg
+            .reply_to_message()
+            .and_then(|r| r.text().map(|t| t.to_string())),
+        reply_to_sender: msg
+            .reply_to_message()
+            .and_then(|r| r.from.as_ref().map(|u| u.id.0.to_string())),
+        mentions,
+        was_mentioned,
+        timestamp: now_secs(),
+        message_id: Some(msg.id.0.to_string()),
     })
 }
 
-fn callback_to_inbound(q: &CallbackQuery) -> Option<InboundMessage> {
+fn callback_to_envelope(q: &CallbackQuery) -> Option<EventEnvelope> {
     let from = &q.from;
-    let msg = q.message.as_ref()?;
-    let (chat_id, message_id) = match msg {
+    let (chat_id, message_id) = match q.message.as_ref()? {
         teloxide::types::MaybeInaccessibleMessage::Regular(m) => {
             (m.chat.id.0.to_string(), m.id.0.to_string())
         }
@@ -760,6 +892,17 @@ fn callback_to_inbound(q: &CallbackQuery) -> Option<InboundMessage> {
             (m.chat.id.0.to_string(), m.id.0.to_string())
         }
     };
+
+    let source = EventSource::Channel("telegram".into());
+    let dispatch_key = EventEnvelope::compute_dispatch_key(
+        &source,
+        "callback",
+        None,
+        Some(&chat_id),
+        Some(&from.id.0.to_string()),
+        None,
+        q.data.as_deref(),
+    );
 
     let sender_name = {
         let first = &from.first_name;
@@ -769,28 +912,32 @@ fn callback_to_inbound(q: &CallbackQuery) -> Option<InboundMessage> {
         }
     };
 
-    Some(InboundMessage {
-        id: message_id,
-        channel: "telegram".into(),
-        chat_id,
-        sender_id: from.id.0.to_string(),
+    Some(EventEnvelope {
+        dispatch_key,
+        source,
+        kind: "callback".into(),
+        channel: Some("telegram".into()),
+        chat_id: Some(chat_id),
+        thread_id: None,
+        sender_id: Some(from.id.0.to_string()),
         sender_name,
         sender_handle: from.username.clone(),
-        text: String::new(),
-        raw_text: None,
-        chat_type: ChatType::Direct,
+        chat_type: None,
         group_subject: None,
-        thread_id: None,
-        timestamp: now_secs(),
+        text: None,
+        raw_text: None,
+        location: None,
+        callback_data: q.data.clone(),
+        callback_query_id: Some(q.id.clone()),
+        attachments: vec![],
+        metadata: None,
         reply_to_id: None,
         reply_to_text: None,
         reply_to_sender: None,
         mentions: vec![],
         was_mentioned: false,
-        attachments: vec![],
-        location: None,
-        callback_data: q.data.clone(),
-        callback_query_id: Some(q.id.clone()),
+        timestamp: now_secs(),
+        message_id: Some(message_id),
     })
 }
 
@@ -819,80 +966,57 @@ impl Channel for TelegramChannel {
         }
     }
 
-    async fn listen(&self, tx: mpsc::Sender<InboundMessage>) -> Result<()> {
-        let bot = self.bot_clone();
+    async fn listen(&self, tx: mpsc::Sender<EventEnvelope>) -> Result<()> {
+        let bot = self.bot.clone();
         let allowed = self.allowed_senders.clone();
+
+        // Get bot username for mention detection
+        let me = bot.get_me().await.map_err(|e| {
+            ChannelError::AuthFailed(format!("Failed to get bot info: {e}"))
+        })?;
+        let bot_username = me.username.clone();
+
         let tx_msg = tx.clone();
         let tx_cb = tx;
-
         let allowed_cb = allowed.clone();
+        let bot_username_cb = bot_username.clone();
 
         let handler = dptree::entry()
             .branch(
-                Update::filter_message().endpoint(
-                    move |msg: Message| {
-                        let tx = tx_msg.clone();
-                        let allowed = allowed.clone();
-                        async move {
-                            if let Some(from) = msg.from.as_ref() {
-                                // Check allowlist
-                                if !allowed.is_empty() {
-                                    let uid = from.id.0.to_string();
-                                    let allowed_by_id = allowed.contains(&uid);
-                                    let allowed_by_name = from
-                                        .username
-                                        .as_ref()
-                                        .map(|u| allowed.contains(u))
-                                        .unwrap_or(false);
-                                    if !allowed_by_id && !allowed_by_name {
-                                        tracing::debug!(
-                                            sender = %from.id,
-                                            "Ignoring message from non-allowed sender"
-                                        );
-                                        return respond(());
-                                    }
-                                }
+                Update::filter_message().endpoint(move |msg: Message| {
+                    let tx = tx_msg.clone();
+                    let allowed = allowed.clone();
+                    let bot_username = bot_username.clone();
+                    async move {
+                        if let Some(from) = msg.from.as_ref() {
+                            if !is_allowed(from, &allowed) {
+                                tracing::debug!(sender = %from.id, "Ignoring non-allowed sender");
+                                return respond(());
                             }
-
-                            if let Some(inbound) = msg_to_inbound(&msg) {
-                                let _ = tx.send(inbound).await;
-                            }
-                            respond(())
                         }
-                    },
-                ),
+                        if let Some(envelope) = msg_to_envelope(&msg, &bot_username) {
+                            let _ = tx.send(envelope).await;
+                        }
+                        respond(())
+                    }
+                }),
             )
             .branch(
-                Update::filter_callback_query().endpoint(
-                    move |bot: Bot, q: CallbackQuery| {
-                        let tx = tx_cb.clone();
-                        let allowed = allowed_cb.clone();
-                        async move {
-                            // Check allowlist
-                            if !allowed.is_empty() {
-                                let uid = q.from.id.0.to_string();
-                                let allowed_by_id = allowed.contains(&uid);
-                                let allowed_by_name = q
-                                    .from
-                                    .username
-                                    .as_ref()
-                                    .map(|u| allowed.contains(u))
-                                    .unwrap_or(false);
-                                if !allowed_by_id && !allowed_by_name {
-                                    return respond(());
-                                }
-                            }
-
-                            // Auto-answer callback query
-                            let _ = bot.answer_callback_query(&q.id).await;
-
-                            if let Some(inbound) = callback_to_inbound(&q) {
-                                let _ = tx.send(inbound).await;
-                            }
-                            respond(())
+                Update::filter_callback_query().endpoint(move |bot: Bot, q: CallbackQuery| {
+                    let tx = tx_cb.clone();
+                    let allowed = allowed_cb.clone();
+                    async move {
+                        if !is_allowed(&q.from, &allowed) {
+                            return respond(());
                         }
-                    },
-                ),
+                        // Auto-answer callback query
+                        let _ = bot.answer_callback_query(&q.id).await;
+                        if let Some(envelope) = callback_to_envelope(&q) {
+                            let _ = tx.send(envelope).await;
+                        }
+                        respond(())
+                    }
+                }),
             );
 
         tokio::spawn(async move {
@@ -912,9 +1036,7 @@ impl Channel for TelegramChannel {
 
     async fn send(&self, message: &OutboundMessage) -> Result<SendResult> {
         let chat_id = ChatId(
-            message
-                .chat_id
-                .parse::<i64>()
+            message.chat_id.parse::<i64>()
                 .map_err(|e| ChannelError::SendFailed(format!("invalid chat_id: {e}")))?,
         );
 
@@ -943,8 +1065,7 @@ impl Channel for TelegramChannel {
             req = req.reply_markup(InlineKeyboardMarkup::new(kb));
         }
 
-        let sent = req
-            .await
+        let sent = req.await
             .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
 
         Ok(SendResult {
@@ -954,71 +1075,50 @@ impl Channel for TelegramChannel {
     }
 
     async fn edit(&self, chat_id: &str, message_id: &str, text: &str) -> Result<()> {
-        let cid = ChatId(
-            chat_id.parse::<i64>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
-        let mid = MessageId(
-            message_id.parse::<i32>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
+        let cid = ChatId(chat_id.parse::<i64>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
+        let mid = MessageId(message_id.parse::<i32>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
 
-        self.bot
-            .edit_message_text(cid, mid, text)
+        self.bot.edit_message_text(cid, mid, text)
             .parse_mode(ParseMode::MarkdownV2)
             .await
             .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
-
         Ok(())
     }
 
     async fn delete(&self, chat_id: &str, message_id: &str) -> Result<()> {
-        let cid = ChatId(
-            chat_id.parse::<i64>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
-        let mid = MessageId(
-            message_id.parse::<i32>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
+        let cid = ChatId(chat_id.parse::<i64>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
+        let mid = MessageId(message_id.parse::<i32>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
 
-        self.bot
-            .delete_message(cid, mid)
-            .await
+        self.bot.delete_message(cid, mid).await
             .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
-
         Ok(())
     }
 
-    async fn add_reaction(
-        &self, chat_id: &str, message_id: &str, emoji: &str,
-    ) -> Result<()> {
-        let cid = ChatId(
-            chat_id.parse::<i64>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
-        let mid = MessageId(
-            message_id.parse::<i32>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
+    async fn add_reaction(&self, chat_id: &str, message_id: &str, emoji: &str) -> Result<()> {
+        let cid = ChatId(chat_id.parse::<i64>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
+        let mid = MessageId(message_id.parse::<i32>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
 
         let reaction = ReactionType::Emoji {
             emoji: ReactionEmoji::from(emoji.to_string()),
         };
-
-        self.bot
-            .set_message_reaction(cid, mid)
+        self.bot.set_message_reaction(cid, mid)
             .reaction(vec![reaction])
             .await
             .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
-
         Ok(())
     }
 
     async fn start_typing(&self, chat_id: &str) -> Result<()> {
-        let cid = ChatId(
-            chat_id.parse::<i64>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
-
-        self.bot
-            .send_chat_action(cid, ChatAction::Typing)
-            .await
+        let cid = ChatId(chat_id.parse::<i64>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
+        self.bot.send_chat_action(cid, ChatAction::Typing).await
             .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
-
         Ok(())
     }
 
@@ -1027,54 +1127,37 @@ impl Channel for TelegramChannel {
     }
 
     async fn pin_message(&self, chat_id: &str, message_id: &str) -> Result<()> {
-        let cid = ChatId(
-            chat_id.parse::<i64>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
-        let mid = MessageId(
-            message_id.parse::<i32>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
-
-        self.bot
-            .pin_chat_message(cid, mid)
-            .await
+        let cid = ChatId(chat_id.parse::<i64>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
+        let mid = MessageId(message_id.parse::<i32>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
+        self.bot.pin_chat_message(cid, mid).await
             .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
-
         Ok(())
     }
 
     async fn unpin_message(&self, chat_id: &str, message_id: &str) -> Result<()> {
-        let cid = ChatId(
-            chat_id.parse::<i64>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
-        let mid = MessageId(
-            message_id.parse::<i32>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
-
-        self.bot
-            .unpin_chat_message(cid)
+        let cid = ChatId(chat_id.parse::<i64>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
+        let mid = MessageId(message_id.parse::<i32>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
+        self.bot.unpin_chat_message(cid)
             .message_id(mid)
             .await
             .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
-
         Ok(())
     }
 
     async fn send_poll(&self, chat_id: &str, poll: &ChannelPoll) -> Result<SendResult> {
-        let cid = ChatId(
-            chat_id.parse::<i64>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
-
+        let cid = ChatId(chat_id.parse::<i64>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
         let options: Vec<InputPollOption> =
             poll.options.iter().map(|o| InputPollOption::from(o.as_str())).collect();
-
-        let sent = self
-            .bot
-            .send_poll(cid, &poll.question, options)
+        let sent = self.bot.send_poll(cid, &poll.question, options)
             .is_anonymous(poll.is_anonymous)
             .allows_multiple_answers(poll.allows_multiple)
             .await
             .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
-
         Ok(SendResult {
             message_id: sent.id.0.to_string(),
             chat_id: chat_id.into(),
@@ -1085,26 +1168,19 @@ impl Channel for TelegramChannel {
         &self, chat_id: &str, lat: f64, lon: f64,
         live_period: Option<u32>, reply_to: Option<&str>,
     ) -> Result<SendResult> {
-        let cid = ChatId(
-            chat_id.parse::<i64>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
-
+        let cid = ChatId(chat_id.parse::<i64>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
         let mut req = self.bot.send_location(cid, lat, lon);
-
         if let Some(period) = live_period {
             req = req.live_period(period);
         }
-
         if let Some(reply_id) = reply_to {
             if let Ok(id) = reply_id.parse::<i32>() {
                 req = req.reply_to_message_id(MessageId(id));
             }
         }
-
-        let sent = req
-            .await
+        let sent = req.await
             .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
-
         Ok(SendResult {
             message_id: sent.id.0.to_string(),
             chat_id: chat_id.into(),
@@ -1114,34 +1190,22 @@ impl Channel for TelegramChannel {
     async fn edit_location(
         &self, chat_id: &str, message_id: &str, lat: f64, lon: f64,
     ) -> Result<()> {
-        let cid = ChatId(
-            chat_id.parse::<i64>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
-        let mid = MessageId(
-            message_id.parse::<i32>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
-
-        self.bot
-            .edit_message_live_location(cid, mid, lat, lon)
-            .await
+        let cid = ChatId(chat_id.parse::<i64>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
+        let mid = MessageId(message_id.parse::<i32>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
+        self.bot.edit_message_live_location(cid, mid, lat, lon).await
             .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
-
         Ok(())
     }
 
     async fn stop_location(&self, chat_id: &str, message_id: &str) -> Result<()> {
-        let cid = ChatId(
-            chat_id.parse::<i64>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
-        let mid = MessageId(
-            message_id.parse::<i32>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
-
-        self.bot
-            .stop_message_live_location(cid, mid)
-            .await
+        let cid = ChatId(chat_id.parse::<i64>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
+        let mid = MessageId(message_id.parse::<i32>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
+        self.bot.stop_message_live_location(cid, mid).await
             .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
-
         Ok(())
     }
 
@@ -1153,69 +1217,40 @@ impl Channel for TelegramChannel {
 #[async_trait]
 impl ChannelInfo for TelegramChannel {
     async fn list_chats(&self) -> Result<Vec<ChatInfo>> {
-        // Telegram Bot API doesn't support listing all chats
-        Err(ChannelError::NotSupported(
-            "Telegram bots cannot list chats".into(),
-        ))
+        Err(ChannelError::NotSupported("Telegram bots cannot list chats".into()))
     }
 
-    async fn list_topics(&self, chat_id: &str) -> Result<Vec<TopicInfo>> {
-        // Would need getForumTopicList which isn't in Bot API yet
+    async fn list_topics(&self, _chat_id: &str) -> Result<Vec<TopicInfo>> {
         Err(ChannelError::NotSupported("list_topics".into()))
     }
 
     async fn get_chat(&self, chat_id: &str) -> Result<ChatInfo> {
-        let cid = ChatId(
-            chat_id.parse::<i64>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
-
-        let chat = self
-            .bot
-            .get_chat(cid)
-            .await
+        let cid = ChatId(chat_id.parse::<i64>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
+        let chat = self.bot.get_chat(cid).await
             .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
-
-        let member_count = self
-            .bot
-            .get_chat_member_count(cid)
-            .await
-            .ok()
-            .map(|c| c as u64);
-
+        let member_count = self.bot.get_chat_member_count(cid).await
+            .ok().map(|c| c as u64);
         Ok(ChatInfo {
             id: chat_id.into(),
             title: chat.title().map(|t| t.to_string()),
-            chat_type: if chat.is_private() {
-                ChatType::Direct
-            } else {
-                ChatType::Group
-            },
+            chat_type: if chat.is_private() { ChatType::Direct } else { ChatType::Group },
             member_count,
         })
     }
 
     async fn get_member(&self, chat_id: &str, user_id: &str) -> Result<MemberInfo> {
-        let cid = ChatId(
-            chat_id.parse::<i64>().map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
-        let uid = UserId(
-            user_id
-                .parse::<u64>()
-                .map_err(|e| ChannelError::SendFailed(e.to_string()))?,
-        );
-
-        let member = self
-            .bot
-            .get_chat_member(cid, uid)
-            .await
+        let cid = ChatId(chat_id.parse::<i64>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
+        let uid = UserId(user_id.parse::<u64>()
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?);
+        let member = self.bot.get_chat_member(cid, uid).await
             .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
-
         let is_admin = matches!(
             member.kind,
             teloxide::types::ChatMemberKind::Administrator { .. }
                 | teloxide::types::ChatMemberKind::Owner { .. }
         );
-
         Ok(MemberInfo {
             user_id: user_id.into(),
             username: member.user.username.clone(),
@@ -1228,7 +1263,7 @@ impl ChannelInfo for TelegramChannel {
 
 - [ ] **Step 2: Run `cargo check -p nocelium-channels --features telegram`**
 
-Expected: compiles. Some API mismatches may need fixing — teloxide types can be tricky. Fix any compilation errors.
+Expected: compiles. Fix any teloxide API mismatches — types can be tricky across versions. Common issues: `thread_id` field type, `ReactionEmoji::from` signature, `live_period` type. Check compiler errors and adjust.
 
 - [ ] **Step 3: Commit**
 
@@ -1247,7 +1282,7 @@ git commit -m "feat(channels): implement TelegramChannel with teloxide"
 
 - [ ] **Step 1: Add allowed_senders to TelegramConfig**
 
-In `config.rs`, update `TelegramConfig`:
+In `config.rs`, update:
 ```rust
 #[derive(Debug, Deserialize, Clone)]
 pub struct TelegramConfig {
@@ -1259,7 +1294,7 @@ pub struct TelegramConfig {
 }
 ```
 
-- [ ] **Step 2: Update nocelium.toml with allowed_senders**
+- [ ] **Step 2: Update nocelium.toml**
 
 ```toml
 [channels.telegram]
@@ -1270,8 +1305,6 @@ enabled = false
 
 - [ ] **Step 3: Run `just check`**
 
-Expected: compiles
-
 - [ ] **Step 4: Commit**
 
 ```bash
@@ -1281,20 +1314,162 @@ git commit -m "feat(config): add allowed_senders to telegram config"
 
 ---
 
-### Task 8: Update Agent Loop
+### Task 8: Simplified Dispatcher
+
+**Files:**
+- Create: `crates/nocelium-core/src/dispatch.rs`
+- Modify: `crates/nocelium-core/src/lib.rs` (add module)
+
+- [ ] **Step 1: Create dispatch.rs**
+
+Simplified dispatcher — no Nomen yet. Matches dispatch keys against glob patterns, defaults to AgentTurn for everything. Full Nomen-based rules/PromptBuilder is future work.
+
+```rust
+use nocelium_channels::EventEnvelope;
+
+/// What to do with a matched event.
+#[derive(Debug, Clone)]
+pub enum DispatchAction {
+    /// Full LLM agent turn.
+    AgentTurn,
+    /// Direct handler, no LLM.
+    Handler(String),
+    /// Ignore the event.
+    Drop,
+}
+
+/// A dispatch rule: glob pattern → action.
+#[derive(Debug, Clone)]
+pub struct DispatchRule {
+    pub pattern: String,
+    pub action: DispatchAction,
+}
+
+/// Routes events by matching dispatch keys against rules.
+pub struct Dispatcher {
+    rules: Vec<DispatchRule>,
+}
+
+impl Dispatcher {
+    pub fn new(rules: Vec<DispatchRule>) -> Self {
+        Self { rules }
+    }
+
+    /// Default dispatcher: everything goes to AgentTurn.
+    pub fn default_agent_turn() -> Self {
+        Self { rules: vec![] }
+    }
+
+    /// Match an event's dispatch key against rules. First match wins.
+    /// Returns AgentTurn if no rule matches.
+    pub fn match_rule(&self, event: &EventEnvelope) -> DispatchAction {
+        for rule in &self.rules {
+            if glob_match(&rule.pattern, &event.dispatch_key) {
+                return rule.action.clone();
+            }
+        }
+        DispatchAction::AgentTurn
+    }
+}
+
+/// Simple glob matching: `*` matches any segment, `**` isn't needed for
+/// colon-separated keys. Supports trailing `*` and exact matches.
+fn glob_match(pattern: &str, key: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+
+    let pattern_parts: Vec<&str> = pattern.split(':').collect();
+    let key_parts: Vec<&str> = key.split(':').collect();
+
+    if pattern_parts.len() > key_parts.len() {
+        return false;
+    }
+
+    for (i, pp) in pattern_parts.iter().enumerate() {
+        if *pp == "*" {
+            // If last pattern part is *, match rest
+            if i == pattern_parts.len() - 1 {
+                return true;
+            }
+            // Otherwise match any single segment, continue
+            continue;
+        }
+        if i >= key_parts.len() || *pp != key_parts[i] {
+            return false;
+        }
+    }
+
+    // Pattern consumed — only match if key has same length (no trailing segments)
+    // unless pattern ended with *
+    pattern_parts.len() == key_parts.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_glob_exact() {
+        assert!(glob_match("telegram:message:-1001234", "telegram:message:-1001234"));
+        assert!(!glob_match("telegram:message:-1001234", "telegram:message:-9999"));
+    }
+
+    #[test]
+    fn test_glob_trailing_wildcard() {
+        assert!(glob_match("telegram:message:*", "telegram:message:-1001234"));
+        assert!(glob_match("telegram:message:*", "telegram:message:-1001234:42"));
+        assert!(glob_match("telegram:*", "telegram:message:-1001234"));
+        assert!(!glob_match("telegram:message:*", "nostr:message:foo"));
+    }
+
+    #[test]
+    fn test_glob_middle_wildcard() {
+        assert!(glob_match("telegram:*:-1001234", "telegram:message:-1001234"));
+        assert!(!glob_match("telegram:*:-1001234", "telegram:message:-9999"));
+    }
+
+    #[test]
+    fn test_glob_star_all() {
+        assert!(glob_match("*", "anything:at:all"));
+    }
+
+    #[test]
+    fn test_glob_no_partial_match() {
+        assert!(!glob_match("telegram:message", "telegram:message:-1001234"));
+    }
+}
+```
+
+- [ ] **Step 2: Add `pub mod dispatch;` to `crates/nocelium-core/src/lib.rs`**
+
+- [ ] **Step 3: Run `just check`**
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add crates/nocelium-core/src/dispatch.rs crates/nocelium-core/src/lib.rs
+git commit -m "feat(core): add simplified event dispatcher with glob matching"
+```
+
+---
+
+### Task 9: Rewrite Agent Loop
 
 **Files:**
 - Rewrite: `crates/nocelium-core/src/agent.rs`
-- Modify: `crates/nocelium-core/Cargo.toml` (if tokio features needed)
 
-- [ ] **Step 1: Rewrite agent.rs for push-based multi-channel architecture**
+- [ ] **Step 1: Rewrite agent.rs for dispatch-based architecture**
 
 The agent loop now:
-1. Takes `Vec<Arc<dyn Channel>>` instead of `&mut dyn Channel`
-2. Creates an mpsc channel, starts all channels listening
-3. Selects on the mpsc receiver
-4. Routes outbound responses by matching `InboundMessage.channel` to the right `Arc<dyn Channel>`
-5. Supports streaming via send + edit for channels with edit capability
+1. Takes `Vec<Arc<dyn Channel>>` and a `Dispatcher`
+2. Creates shared mpsc queue, starts all channels listening
+3. Receives `EventEnvelope` from queue
+4. Matches dispatch rules
+5. For `AgentTurn`: sends to LLM, routes response back via channel name
+6. For `Drop`: ignores
+7. `Handler`: logged as unimplemented (future Nomen work)
+8. Streams via send+edit for channels with edit capability
 
 ```rust
 use std::collections::HashMap;
@@ -1309,8 +1484,9 @@ use rig::streaming::StreamingPrompt;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
+use crate::dispatch::{DispatchAction, Dispatcher};
 use crate::identity::Identity;
-use nocelium_channels::{Channel, InboundMessage, OutboundMessage};
+use nocelium_channels::{Channel, EventEnvelope, OutboundMessage};
 use nocelium_tools::{ReadFileTool, ShellTool, WriteFileTool};
 
 pub fn build_agent(
@@ -1355,13 +1531,17 @@ pub fn build_agent(
     Ok(agent)
 }
 
-/// The main agent loop: push-based, multi-channel.
+/// Dispatch-based agent loop.
+///
+/// All channels and event sources push to the same mpsc queue. The dispatcher
+/// routes events by dispatch key to handlers or LLM agent turns.
 pub async fn run_loop(
     agent: &Agent<openai::completion::CompletionModel>,
     channels: Vec<Arc<dyn Channel>>,
+    dispatcher: &Dispatcher,
     streaming: bool,
 ) -> Result<()> {
-    let (tx, mut rx) = mpsc::channel::<InboundMessage>(256);
+    let (tx, mut rx) = mpsc::channel::<EventEnvelope>(256);
 
     // Build channel lookup by name
     let channel_map: HashMap<String, Arc<dyn Channel>> = channels
@@ -1369,7 +1549,7 @@ pub async fn run_loop(
         .map(|ch| (ch.name().to_string(), ch.clone()))
         .collect();
 
-    // Start all channels listening
+    // Start all channels listening on the shared queue
     for ch in &channels {
         ch.listen(tx.clone())
             .await
@@ -1377,170 +1557,210 @@ pub async fn run_loop(
         tracing::info!(channel = ch.name(), "Channel started");
     }
 
-    // Drop our tx so the loop ends when all channel tasks finish
     drop(tx);
 
-    tracing::info!(streaming = streaming, "Agent loop started");
+    tracing::info!(streaming = streaming, "Agent loop started (dispatch mode)");
 
-    while let Some(inbound) = rx.recv().await {
-        if inbound.text.trim() == "/quit" || inbound.text.trim() == "/exit" {
-            tracing::info!("Exit command received");
-            if let Some(ch) = channel_map.get(&inbound.channel) {
-                let _ = ch
-                    .send(&OutboundMessage {
-                        chat_id: inbound.chat_id.clone(),
-                        text: "Goodbye!".into(),
-                        reply_to_id: None,
-                        thread_id: inbound.thread_id.clone(),
-                        attachments: vec![],
-                        buttons: None,
-                        silent: false,
-                    })
-                    .await;
+    while let Some(event) = rx.recv().await {
+        // Check for exit commands
+        if let Some(ref text) = event.text {
+            if text.trim() == "/quit" || text.trim() == "/exit" {
+                tracing::info!("Exit command received");
+                if let Some(ch_name) = &event.channel {
+                    if let Some(ch) = channel_map.get(ch_name) {
+                        if let Some(ref chat_id) = event.chat_id {
+                            let _ = ch.send(&OutboundMessage {
+                                chat_id: chat_id.clone(),
+                                text: "Goodbye!".into(),
+                                reply_to_id: None,
+                                thread_id: event.thread_id.clone(),
+                                attachments: vec![],
+                                buttons: None,
+                                silent: false,
+                            }).await;
+                        }
+                    }
+                }
+                break;
             }
-            break;
         }
 
         tracing::debug!(
-            channel = %inbound.channel,
-            sender = %inbound.sender_id,
-            message = %inbound.text,
-            "Received message"
+            dispatch_key = %event.dispatch_key,
+            kind = %event.kind,
+            "Event received"
         );
 
-        let ch = match channel_map.get(&inbound.channel) {
-            Some(ch) => ch.clone(),
-            None => {
-                tracing::error!(channel = %inbound.channel, "Unknown channel");
+        // Match dispatch rule
+        let action = dispatcher.match_rule(&event);
+
+        match action {
+            DispatchAction::Drop => {
+                tracing::trace!(key = %event.dispatch_key, "Dropped event");
                 continue;
             }
-        };
-
-        // Show typing indicator if supported
-        if ch.capabilities().typing {
-            let _ = ch.start_typing(&inbound.chat_id).await;
-        }
-
-        if streaming && ch.capabilities().edit {
-            // Stream via send + edit
-            use futures::StreamExt;
-            use rig::agent::{MultiTurnStreamItem, Text};
-            use rig::streaming::StreamedAssistantContent;
-
-            let placeholder = OutboundMessage {
-                chat_id: inbound.chat_id.clone(),
-                text: "...".into(),
-                reply_to_id: Some(inbound.id.clone()),
-                thread_id: inbound.thread_id.clone(),
-                attachments: vec![],
-                buttons: None,
-                silent: false,
-            };
-
-            match ch.send(&placeholder).await {
-                Ok(result) => {
-                    let mut buffer = String::new();
-                    let mut stream = agent.stream_prompt(&inbound.text).await;
-                    let mut last_edit = tokio::time::Instant::now();
-
-                    while let Some(item) = stream.next().await {
-                        match item {
-                            Ok(MultiTurnStreamItem::StreamAssistantItem(
-                                StreamedAssistantContent::Text(Text { text }),
-                            )) => {
-                                buffer.push_str(&text);
-                                // Throttle edits: every 500ms or 50 chars
-                                if last_edit.elapsed()
-                                    >= tokio::time::Duration::from_millis(500)
-                                    || buffer.len() % 50 < text.len()
-                                {
-                                    let _ = ch
-                                        .edit(
-                                            &inbound.chat_id,
-                                            &result.message_id,
-                                            &buffer,
-                                        )
-                                        .await;
-                                    last_edit = tokio::time::Instant::now();
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!(error = %e, "Streaming error");
-                                buffer = format!("Error: {e}");
-                                break;
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // Final edit with complete text
-                    if !buffer.is_empty() {
-                        let _ = ch
-                            .edit(&inbound.chat_id, &result.message_id, &buffer)
-                            .await;
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to send placeholder");
-                }
+            DispatchAction::Handler(name) => {
+                tracing::warn!(
+                    handler = %name,
+                    key = %event.dispatch_key,
+                    "Handler dispatch not yet implemented"
+                );
+                continue;
             }
-        } else {
-            // Non-streaming: buffer full response, send once
-            match agent.prompt(&inbound.text).await {
-                Ok(response) => {
-                    let out = OutboundMessage {
-                        chat_id: inbound.chat_id.clone(),
-                        text: response,
-                        reply_to_id: Some(inbound.id.clone()),
-                        thread_id: inbound.thread_id.clone(),
-                        attachments: vec![],
-                        buttons: None,
-                        silent: false,
-                    };
-                    if let Err(e) = ch.send(&out).await {
-                        tracing::error!(error = %e, "Failed to send response");
-                    }
-                }
-                Err(e) => {
-                    let out = OutboundMessage {
-                        chat_id: inbound.chat_id.clone(),
-                        text: format!("Error: {e}"),
-                        reply_to_id: None,
-                        thread_id: inbound.thread_id.clone(),
-                        attachments: vec![],
-                        buttons: None,
-                        silent: false,
-                    };
-                    tracing::error!(error = %e, "Agent prompt failed");
-                    let _ = ch.send(&out).await;
-                }
+            DispatchAction::AgentTurn => {
+                handle_agent_turn(agent, &event, &channel_map, streaming).await;
             }
         }
     }
 
     Ok(())
 }
+
+async fn handle_agent_turn(
+    agent: &Agent<openai::completion::CompletionModel>,
+    event: &EventEnvelope,
+    channel_map: &HashMap<String, Arc<dyn Channel>>,
+    streaming: bool,
+) {
+    let message_text = match &event.text {
+        Some(t) if !t.trim().is_empty() => t.clone(),
+        _ => return, // no text to process
+    };
+
+    let ch = match event.channel.as_ref().and_then(|name| channel_map.get(name)) {
+        Some(ch) => ch.clone(),
+        None => return,
+    };
+
+    let chat_id = match &event.chat_id {
+        Some(id) => id.clone(),
+        None => return,
+    };
+
+    // Typing indicator
+    if ch.capabilities().typing {
+        let _ = ch.start_typing(&chat_id).await;
+    }
+
+    if streaming && ch.capabilities().edit {
+        stream_via_edit(agent, &message_text, &ch, &chat_id, event).await;
+    } else {
+        send_buffered(agent, &message_text, &ch, &chat_id, event).await;
+    }
+}
+
+async fn stream_via_edit(
+    agent: &Agent<openai::completion::CompletionModel>,
+    message_text: &str,
+    ch: &Arc<dyn Channel>,
+    chat_id: &str,
+    event: &EventEnvelope,
+) {
+    use futures::StreamExt;
+    use rig::agent::{MultiTurnStreamItem, Text};
+    use rig::streaming::StreamedAssistantContent;
+
+    let placeholder = OutboundMessage {
+        chat_id: chat_id.into(),
+        text: "...".into(),
+        reply_to_id: event.message_id.clone(),
+        thread_id: event.thread_id.clone(),
+        attachments: vec![],
+        buttons: None,
+        silent: false,
+    };
+
+    let result = match ch.send(&placeholder).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to send placeholder");
+            return;
+        }
+    };
+
+    let mut buffer = String::new();
+    let mut stream = agent.stream_prompt(message_text).await;
+    let mut last_edit = tokio::time::Instant::now();
+    let mut last_edit_len: usize = 0;
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(MultiTurnStreamItem::StreamAssistantItem(
+                StreamedAssistantContent::Text(Text { text }),
+            )) => {
+                buffer.push_str(&text);
+                let elapsed = last_edit.elapsed() >= tokio::time::Duration::from_millis(500);
+                let chars_added = buffer.len() - last_edit_len >= 50;
+                if elapsed || chars_added {
+                    let _ = ch.edit(chat_id, &result.message_id, &buffer).await;
+                    last_edit = tokio::time::Instant::now();
+                    last_edit_len = buffer.len();
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Streaming error");
+                buffer = format!("Error: {e}");
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    if !buffer.is_empty() {
+        let _ = ch.edit(chat_id, &result.message_id, &buffer).await;
+    }
+}
+
+async fn send_buffered(
+    agent: &Agent<openai::completion::CompletionModel>,
+    message_text: &str,
+    ch: &Arc<dyn Channel>,
+    chat_id: &str,
+    event: &EventEnvelope,
+) {
+    let (text, is_error) = match agent.prompt(message_text).await {
+        Ok(response) => (response, false),
+        Err(e) => {
+            tracing::error!(error = %e, "Agent prompt failed");
+            (format!("Error: {e}"), true)
+        }
+    };
+
+    let out = OutboundMessage {
+        chat_id: chat_id.into(),
+        text,
+        reply_to_id: if is_error { None } else { event.message_id.clone() },
+        thread_id: event.thread_id.clone(),
+        attachments: vec![],
+        buttons: None,
+        silent: false,
+    };
+
+    if let Err(e) = ch.send(&out).await {
+        tracing::error!(error = %e, "Failed to send response");
+    }
+}
 ```
 
 - [ ] **Step 2: Run `just check`**
 
-Expected: core crate compiles. Main may fail (signature change). That's expected.
+Expected: compiles. `main.rs` will fail (signature change).
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add crates/nocelium-core/src/agent.rs
-git commit -m "feat(core): rewrite agent loop for push-based multi-channel architecture"
+git commit -m "feat(core): dispatch-based agent loop with EventEnvelope routing"
 ```
 
 ---
 
-### Task 9: Wire Up in main.rs
+### Task 10: Wire Up in main.rs
 
 **Files:**
 - Modify: `src/main.rs`
 
-- [ ] **Step 1: Update main.rs to start configured channels**
+- [ ] **Step 1: Update main.rs**
 
 ```rust
 use std::sync::Arc;
@@ -1553,20 +1773,18 @@ use nocelium_channels::Channel;
 use nocelium_channels::stdio::StdioChannel;
 #[cfg(feature = "telegram")]
 use nocelium_channels::telegram::TelegramChannel;
+use nocelium_core::dispatch::Dispatcher;
 use nocelium_core::{Config, Identity};
 
 #[derive(Parser)]
 #[command(name = "nocelium", about = "Nostr-native AI agent runtime")]
 struct Cli {
-    /// Path to config file
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    /// Generate a new identity and exit
     #[arg(long)]
     gen_identity: bool,
 
-    /// Show identity info and exit
     #[arg(long)]
     show_identity: bool,
 }
@@ -1601,15 +1819,12 @@ async fn main() -> Result<()> {
 
     println!("Nocelium v{}", env!("CARGO_PKG_VERSION"));
     println!("Identity: {}", identity.npub());
-    println!(
-        "Provider: {} ({})",
-        config.provider.provider_type, config.provider.model
-    );
+    println!("Provider: {} ({})", config.provider.provider_type, config.provider.model);
     println!("Streaming: {}", config.agent.streaming);
 
     let agent = nocelium_core::agent::build_agent(&config, &identity)?;
 
-    // Build channel list from config
+    // Build channel list
     let mut channels: Vec<Arc<dyn Channel>> = Vec::new();
 
     if config.channels.stdio {
@@ -1629,7 +1844,6 @@ async fn main() -> Result<()> {
                         "Telegram enabled but no token. Set TELEGRAM_BOT_TOKEN or channels.telegram.token"
                     )
                 })?;
-
             let tg = TelegramChannel::new(&token, tg_config.allowed_senders.clone());
             channels.push(Arc::new(tg));
             println!("Channel: telegram");
@@ -1640,42 +1854,42 @@ async fn main() -> Result<()> {
         anyhow::bail!("No channels enabled. Enable at least one in config.");
     }
 
+    // Simplified dispatcher — all events go to AgentTurn (no Nomen rules yet)
+    let dispatcher = Dispatcher::default_agent_turn();
+
     println!("Type /quit to exit\n");
 
-    nocelium_core::agent::run_loop(&agent, channels, config.agent.streaming).await?;
+    nocelium_core::agent::run_loop(&agent, channels, &dispatcher, config.agent.streaming).await?;
 
     Ok(())
 }
 ```
 
-- [ ] **Step 2: Run `just check`**
+- [ ] **Step 2: Run `just ci`**
 
-Expected: full project compiles
+Full validation: check + clippy + tests.
 
-- [ ] **Step 3: Run `just ci`**
-
-Expected: check + clippy + tests all pass. Fix any warnings/errors.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add src/main.rs
-git commit -m "feat: wire up multi-channel startup with telegram support"
+git commit -m "feat: wire up dispatch-based multi-channel startup"
 ```
 
 ---
 
-### Task 10: Final Validation
+### Task 11: Final Validation
 
 - [ ] **Step 1: Run `just ci`**
 
-Full validation: check + clippy + tests.
+- [ ] **Step 2: Verify default config still works**
 
-- [ ] **Step 2: Verify config works**
-
-Test that running with default config (telegram disabled) still works:
 ```bash
 cargo run -- --show-identity
 ```
 
-- [ ] **Step 3: Squash commits if desired, or leave as feature branch**
+- [ ] **Step 3: Run dispatch tests**
+
+```bash
+cargo test -p nocelium-core -- dispatch
+```

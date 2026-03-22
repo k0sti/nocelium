@@ -58,14 +58,14 @@ graph TD
 ## Input / Output Model
 
 ```
-Inbound (all produce EventEnvelope):
+Inbound (all produce Event):
   Channels (telegram, nostr, stdio) ─┐
   CronSource (timers, cron)          ├→ Shared mpsc → Dispatcher → Handler | AgentTurn | Drop
   WebhookSource (HTTP POST)          │
   NostrSource (relay subscriptions)  ┘
 
 Dispatch:
-  EventEnvelope.dispatch_key matched against rules in Nomen (config/dispatch/rules)
+  Event.dispatch_key matched against rules in Nomen (config/dispatch/rules)
   → Handler: direct code execution, no LLM
   → AgentTurn: build prompt from Nomen topics, call LLM
   → Drop: ignore
@@ -83,7 +83,7 @@ Config + State:
 
 | Boundary | Trait / Type | Called by | Methods | Status |
 |---|---|---|---|---|
-| core → channels | `Channel` trait | agent loop | `listen(tx: Sender<EventEnvelope>)`, `send()`, `edit()`, `delete()`, reactions, typing, pins, polls, location | ✅ impl: stdio |
+| core → channels | `Channel` trait | agent loop | `listen(tx: Sender<Event>)`, `send()`, `edit()`, `delete()`, reactions, typing, pins, polls, location | ✅ impl: stdio |
 | core → channels | `ChannelInfo` trait (optional) | agent loop | `list_chats()`, `list_topics()`, `get_chat()`, `get_member()` | 🔲 planned |
 | core → dispatch | `Dispatcher` | agent loop | pattern-match dispatch_key → Handler / AgentTurn / Drop | 🔲 planned |
 | core → dispatch | `PromptBuilder` | dispatcher | assemble prompt from Nomen topic lists | 🔲 planned |
@@ -91,7 +91,7 @@ Config + State:
 | core → tools | rig `Tool` trait | LLM via rig | `definition()`, `call()` | ✅ impl: shell, read, write |
 | core → memory | `MemoryClient` (wraps `nomen-wire::ReconnectingClient`) | agent loop + tools + event sources | `search()`, `store()`, `get()`, `list()`, `delete()`, `subscribe()` | 🔲 stub |
 | core → LLM | rig `Agent` | agent loop | `prompt()`, `stream_prompt()` | ✅ OpenRouter |
-| core → events | `EventSource` trait | tokio::spawn | `start(tx: Sender<EventEnvelope>)` | 🔲 planned |
+| core → events | `EventSource` trait | tokio::spawn | `start(tx: Sender<Event>)` | 🔲 planned |
 | binary → core | `Identity`, `build_agent()` | main.rs | direct calls | ✅ |
 
 ## Data Flow (Current)
@@ -117,7 +117,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Src as Any Source (channel/cron/webhook)
-    participant Q as Shared Queue (EventEnvelope)
+    participant Q as Shared Queue (Event)
     participant Core as Dispatcher + Agent Loop
     participant Builder as PromptBuilder
     participant Nomen as Nomen
@@ -126,7 +126,7 @@ sequenceDiagram
 
     Note over Core: Startup: load config, dispatch rules, prompt configs from Nomen
 
-    Src->>Q: EventEnvelope
+    Src->>Q: Event
     Q->>Core: recv()
     Core->>Core: match dispatch_key against rules
 
