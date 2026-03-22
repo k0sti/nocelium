@@ -13,16 +13,8 @@ use nocelium_core::{Config, Dispatcher, Identity};
 #[command(name = "nocelium", about = "Nostr-native AI agent runtime")]
 struct Cli {
     /// Path to config file
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     config: Option<PathBuf>,
-
-    /// Generate a new identity and exit
-    #[arg(long)]
-    gen_identity: bool,
-
-    /// Show identity info and exit
-    #[arg(long)]
-    show_identity: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -30,10 +22,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run the agent interactively
+    Agent,
+
     /// Manage systemd user service
     Service {
         #[command(subcommand)]
         action: ServiceAction,
+    },
+
+    /// Manage Nostr identity
+    Identity {
+        #[command(subcommand)]
+        action: IdentityAction,
+    },
+
+    /// Configuration management
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
     },
 }
 
@@ -57,52 +64,65 @@ enum ServiceAction {
     Uninstall,
 }
 
+#[derive(Subcommand)]
+enum IdentityAction {
+    /// Show identity (npub)
+    Show,
+    /// Generate a new identity
+    Generate,
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Show resolved configuration
+    Show,
+    /// Migrate TOML config to Nomen
+    Migrate,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let is_interactive = std::io::stdin().is_terminal();
-    let default_level = if is_interactive { "warn" } else { "info" };
+    let cli = Cli::parse();
+
+    // No subcommand → show help
+    let command = match cli.command {
+        Some(cmd) => cmd,
+        None => {
+            use clap::CommandFactory;
+            Cli::command().print_help()?;
+            println!();
+            return Ok(());
+        }
+    };
+
+    // Init logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(format!("nocelium={default_level}").parse()?)
-                .add_directive(format!("nocelium_core={default_level}").parse()?)
-                .add_directive(format!("nocelium_tools={default_level}").parse()?)
-                .add_directive(format!("nocelium_memory={default_level}").parse()?)
-                .add_directive(format!("nocelium_channels={default_level}").parse()?)
+                .add_directive("nocelium=info".parse()?)
+                .add_directive("nocelium_core=info".parse()?)
+                .add_directive("nocelium_tools=info".parse()?)
+                .add_directive("nocelium_memory=info".parse()?)
+                .add_directive("nocelium_channels=info".parse()?)
         )
         .init();
 
-    let cli = Cli::parse();
-
-    // Handle service subcommand
-    if let Some(Command::Service { action }) = &cli.command {
-        return handle_service(action, &cli.config).await;
+    match command {
+        Command::Agent => run_agent(&cli.config).await,
+        Command::Service { action } => handle_service(&action, &cli.config).await,
+        Command::Identity { action } => handle_identity(&action, &cli.config),
+        Command::Config { action } => handle_config(&action, &cli.config).await,
     }
+}
 
-    // Load config
-    let config = match &cli.config {
-        Some(path) => Config::load(path)?,
-        None => Config::load_default()?,
-    };
-
-    // Load or generate identity
+async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
+    let config = load_config(config_path)?;
     let identity = Identity::load_or_generate(&config.identity)?;
 
-    if cli.gen_identity {
-        println!("Identity generated: {}", identity.npub());
-        return Ok(());
-    }
-
-    if cli.show_identity {
-        println!("npub: {}", identity.npub());
-        return Ok(());
-    }
-
-    // Build the agent
     println!("Nocelium v{}", env!("CARGO_PKG_VERSION"));
     println!("Identity: {}", identity.npub());
     println!("Provider: {} ({})", config.provider.provider_type, config.provider.model);
-    println!("Type /quit to exit\n");
+    println!();
 
     let memory = if config.memory.enabled {
         let client = nocelium_memory::MemoryClient::new(&config.memory.socket_path, 3);
@@ -118,14 +138,16 @@ async fn main() -> Result<()> {
     // Event queue
     let (tx, mut rx) = tokio::sync::mpsc::channel(100);
 
-    // Build channel map for response routing
+    // Build channel map
     let mut channels: HashMap<String, Arc<dyn Channel>> = HashMap::new();
 
-    // Stdio channel (only when running interactively)
+    // Stdio channel (only when interactive)
     let is_interactive = std::io::stdin().is_terminal();
     if is_interactive {
         let stdio: Arc<dyn Channel> = Arc::new(StdioChannel::new());
         channels.insert("stdio".into(), Arc::clone(&stdio));
+        println!("Channel: stdio (interactive)");
+        println!("Type /quit to exit\n");
     }
 
     // Telegram channel (if enabled)
@@ -153,33 +175,33 @@ async fn main() -> Result<()> {
                     tracing::error!(error = %e, "Telegram listener failed");
                 }
             });
-            println!("Telegram: enabled");
+            println!("Channel: telegram");
         }
     }
-
-    // Spawn stdio listener (only in interactive mode)
-    if let Some(stdio) = channels.get("stdio") {
-        let stdio_tx = tx.clone();
-        let stdio_listen = Arc::clone(stdio);
-        tokio::spawn(async move {
-            if let Err(e) = stdio_listen.listen(stdio_tx).await {
-                tracing::error!(error = %e, "Stdio listener failed");
-            }
-        });
-    }
-
-    // Drop our tx so the channel closes when all listeners exit
-    drop(tx);
-
-    // Dispatcher (default: everything goes to agent turn)
-    let dispatcher = Dispatcher::default_agent_turn();
 
     // Check we have at least one channel
     if channels.is_empty() {
         anyhow::bail!("No channels available. Enable Telegram or run interactively.");
     }
 
-    // Run the agent loop
+    // Spawn listeners for all channels
+    for (name, channel) in &channels {
+        if name == "telegram" {
+            continue; // already spawned above
+        }
+        let ch_tx = tx.clone();
+        let ch = Arc::clone(channel);
+        tokio::spawn(async move {
+            if let Err(e) = ch.listen(ch_tx).await {
+                tracing::error!(error = %e, "Channel listener failed");
+            }
+        });
+    }
+
+    drop(tx);
+
+    let dispatcher = Dispatcher::default_agent_turn();
+
     nocelium_core::agent::run_loop(
         &agent,
         &mut rx,
@@ -192,6 +214,47 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn handle_identity(action: &IdentityAction, config_path: &Option<PathBuf>) -> Result<()> {
+    let config = load_config(config_path)?;
+
+    match action {
+        IdentityAction::Show => {
+            let identity = Identity::load_or_generate(&config.identity)?;
+            println!("npub: {}", identity.npub());
+        }
+        IdentityAction::Generate => {
+            let identity = Identity::load_or_generate(&config.identity)?;
+            println!("Identity generated: {}", identity.npub());
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_config(action: &ConfigAction, config_path: &Option<PathBuf>) -> Result<()> {
+    match action {
+        ConfigAction::Show => {
+            let config = load_config(config_path)?;
+            println!("{}", toml::to_string_pretty(&config)?);
+        }
+        ConfigAction::Migrate => {
+            println!("Config migration to Nomen is not yet implemented.");
+            println!("This will read your TOML config and store it as Nomen memories.");
+        }
+    }
+
+    Ok(())
+}
+
+fn load_config(config_path: &Option<PathBuf>) -> Result<Config> {
+    match config_path {
+        Some(path) => Config::load(path),
+        None => Config::load_default(),
+    }
+}
+
+// --- Service management ---
+
 const SERVICE_NAME: &str = "nocelium";
 
 async fn handle_service(action: &ServiceAction, config_path: &Option<PathBuf>) -> Result<()> {
@@ -202,15 +265,12 @@ async fn handle_service(action: &ServiceAction, config_path: &Option<PathBuf>) -
 
     match action {
         ServiceAction::Install => {
-            // Find the binary
             let exe = std::env::current_exe()?;
             let exe_path = exe.display();
 
-            // Resolve config path
             let config_arg = if let Some(p) = config_path {
                 format!(" --config {}", p.canonicalize()?.display())
             } else {
-                // Try default locations
                 let default_paths = [
                     PathBuf::from("./nocelium.toml"),
                     dirs::config_dir()
@@ -233,7 +293,7 @@ After=network.target nomen.service
 
 [Service]
 Type=simple
-ExecStart={exe_path}{config_arg}
+ExecStart={exe_path}{config_arg} agent
 Restart=always
 RestartSec=5
 Environment=RUST_LOG=nocelium=info
@@ -245,8 +305,6 @@ WantedBy=default.target
 
             std::fs::create_dir_all(&service_dir)?;
             std::fs::write(&service_file, unit)?;
-
-            // Reload systemd
             run_systemctl(&["daemon-reload"])?;
 
             println!("Service installed: {}", service_file.display());

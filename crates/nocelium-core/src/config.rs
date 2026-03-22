@@ -1,7 +1,7 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub identity: IdentityConfig,
     pub agent: AgentConfig,
@@ -14,12 +14,12 @@ pub struct Config {
     pub tools: ToolsConfig,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct IdentityConfig {
     pub key_path: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AgentConfig {
     pub preamble: String,
     #[serde(default = "default_max_tokens")]
@@ -32,7 +32,7 @@ fn default_max_tokens() -> u64 {
     4096
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProviderConfig {
     #[serde(rename = "type")]
     pub provider_type: String,
@@ -42,12 +42,12 @@ pub struct ProviderConfig {
     pub routstr: Option<RoutstrConfig>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RoutstrConfig {
     pub base_url: String,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct MemoryConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -65,7 +65,7 @@ fn default_socket_path() -> String {
     }
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ChannelsConfig {
     #[serde(default)]
     pub stdio: bool,
@@ -75,14 +75,14 @@ pub struct ChannelsConfig {
     pub nostr: Option<NostrConfig>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TelegramConfig {
     #[serde(default)]
     pub enabled: bool,
     pub token: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NostrConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -90,7 +90,7 @@ pub struct NostrConfig {
     pub relays: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ToolsConfig {
     #[serde(default = "default_true")]
     pub shell: bool,
