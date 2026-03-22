@@ -1346,11 +1346,10 @@ dependencies = [
 name = "nocelium-memory"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "async-trait",
- "reqwest 0.12.28",
+ "nomen-wire",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -1378,6 +1377,20 @@ checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
 dependencies = [
  "memchr",
  "minimal-lexical",
+]
+
+[[package]]
+name = "nomen-wire"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
