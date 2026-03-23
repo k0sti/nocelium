@@ -214,7 +214,7 @@ pub async fn run_loop(
                 });
                 continue;
             }
-            DispatchAction::Handler(name) => {
+            DispatchAction::Handler { name } => {
                 let handler_start = Instant::now();
                 let mut error_msg = None;
 

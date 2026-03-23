@@ -7,7 +7,9 @@ pub enum DispatchAction {
     /// Build prompt, call LLM
     AgentTurn,
     /// Direct handler, no LLM
-    Handler(String),
+    Handler {
+        name: String,
+    },
     /// Ignore the event
     Drop,
 }
@@ -151,7 +153,7 @@ mod tests {
         let d = Dispatcher::new(vec![
             DispatchRule {
                 pattern: "telegram:message:direct:*".into(),
-                action: DispatchAction::Handler("dm_handler".into()),
+                action: DispatchAction::Handler { name: "dm_handler".into() },
                 prompt_config: None,
             },
             DispatchRule {
@@ -162,7 +164,7 @@ mod tests {
         ]);
 
         match &d.match_rule("telegram:message:direct:60996061").action {
-            DispatchAction::Handler(name) => assert_eq!(name, "dm_handler"),
+            DispatchAction::Handler { name } => assert_eq!(name, "dm_handler"),
             _ => panic!("Expected handler"),
         }
 
