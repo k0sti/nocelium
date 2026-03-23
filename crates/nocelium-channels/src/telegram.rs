@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use teloxide::prelude::*;
-use teloxide::types::{ChatKind, MessageId};
+use teloxide::types::{BotCommand, ChatKind, MessageId};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -12,12 +12,18 @@ use crate::{
 /// Telegram channel using teloxide.
 pub struct TelegramChannel {
     bot: Bot,
+    /// If non-empty, only accept messages from these Telegram user IDs.
+    allow_from: Vec<u64>,
 }
 
 impl TelegramChannel {
-    pub fn new(token: &str) -> Self {
+    pub fn new(token: &str, allow_from: Vec<u64>) -> Self {
+        if !allow_from.is_empty() {
+            tracing::info!(?allow_from, "Telegram: restricting to allowed user IDs");
+        }
         Self {
             bot: Bot::new(token),
+            allow_from,
         }
     }
 }
@@ -47,13 +53,34 @@ impl Channel for TelegramChannel {
     }
 
     async fn listen(&self, tx: mpsc::Sender<Event>) -> Result<()> {
+        // Register bot commands for Telegram's command menu
+        let commands = vec![
+            BotCommand::new("reset", "Reset conversation history"),
+        ];
+        if let Err(e) = self.bot.set_my_commands(commands).await {
+            tracing::warn!(error = %e, "Failed to register bot commands");
+        } else {
+            tracing::info!("Registered bot commands");
+        }
+
+        let allow_from = self.allow_from.clone();
         let handler = Update::filter_message().endpoint(
             move |msg: teloxide::types::Message, _bot: Bot| {
                 let tx = tx.clone();
+                let allow_from = allow_from.clone();
                 async move {
                     let text = msg.text().unwrap_or("").to_string();
                     if text.is_empty() {
                         return respond(());
+                    }
+
+                    // Filter by allowed user IDs if configured
+                    if !allow_from.is_empty() {
+                        let sender_uid = msg.from.as_ref().map(|u| u.id.0).unwrap_or(0);
+                        if !allow_from.contains(&sender_uid) {
+                            tracing::debug!(sender_uid, "Ignoring message from non-allowed user");
+                            return respond(());
+                        }
                     }
 
                     let chat_id = msg.chat.id.0.to_string();
@@ -145,6 +172,26 @@ impl Channel for TelegramChannel {
         let msg_id: i32 = message_id.parse()?;
         self.bot
             .edit_message_text(ChatId(chat), MessageId(msg_id), text)
+            .await?;
+        Ok(())
+    }
+
+    async fn delete(&self, chat_id: &str, message_id: &str) -> Result<()> {
+        let chat: i64 = chat_id.parse()?;
+        let msg_id: i32 = message_id.parse()?;
+        self.bot
+            .delete_message(ChatId(chat), MessageId(msg_id))
+            .await?;
+        Ok(())
+    }
+
+    async fn react(&self, chat_id: &str, message_id: &str, emoji: &str) -> Result<()> {
+        use teloxide::types::ReactionType;
+        let chat: i64 = chat_id.parse()?;
+        let msg_id: i32 = message_id.parse()?;
+        self.bot
+            .set_message_reaction(ChatId(chat), MessageId(msg_id))
+            .reaction(vec![ReactionType::Emoji { emoji: emoji.to_string() }])
             .await?;
         Ok(())
     }

@@ -52,6 +52,8 @@ enum ServiceAction {
     Start,
     /// Stop the service
     Stop,
+    /// Restart the service
+    Restart,
     /// Show service status
     Status,
     /// Follow service logs
@@ -116,8 +118,13 @@ async fn main() -> Result<()> {
 }
 
 async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
+    let startup = std::time::Instant::now();
+    tracing::info!("Loading config...");
     let config = load_config(config_path)?;
+    tracing::info!(elapsed_ms = startup.elapsed().as_millis(), "Config loaded");
+
     let identity = Identity::load_or_generate(&config.identity)?;
+    tracing::info!(elapsed_ms = startup.elapsed().as_millis(), npub = %identity.npub(), "Identity loaded");
 
     println!("Nocelium v{}", env!("CARGO_PKG_VERSION"));
     println!("Identity: {}", identity.npub());
@@ -125,7 +132,9 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
     println!();
 
     let memory = if config.memory.enabled {
+        tracing::info!("Connecting to Nomen at {}...", config.memory.socket_path);
         let client = nocelium_memory::MemoryClient::new(&config.memory.socket_path, 3);
+        tracing::info!(elapsed_ms = startup.elapsed().as_millis(), "Memory client created");
         println!("Memory: enabled ({})", config.memory.socket_path);
         Some(Arc::new(client))
     } else {
@@ -133,7 +142,31 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
         None
     };
 
-    let agent = nocelium_core::agent::build_agent(&config, &identity, memory.clone())?;
+    // Create Telegram context if Telegram is enabled (tools need it)
+    let tg_ctx = {
+        #[cfg(feature = "telegram")]
+        {
+            config.channels.telegram.as_ref()
+                .filter(|c| c.enabled)
+                .map(|_| nocelium_tools::TelegramContext::new())
+        }
+        #[cfg(not(feature = "telegram"))]
+        { None::<nocelium_tools::TelegramContext> }
+    };
+
+    // Load initial context from Nomen
+    let initial_context = if let Some(ref mem) = memory {
+        tracing::info!("Loading initial context from Nomen...");
+        let ctx = nocelium_core::agent::load_initial_context(mem, &identity.npub()).await;
+        tracing::info!(elapsed_ms = startup.elapsed().as_millis(), has_context = ctx.is_some(), "Initial context loaded");
+        ctx
+    } else {
+        None
+    };
+
+    tracing::info!("Building agent...");
+    let agent = nocelium_core::agent::build_agent(&config, &identity, memory.clone(), tg_ctx.clone(), initial_context.as_deref())?;
+    tracing::info!(elapsed_ms = startup.elapsed().as_millis(), "Agent built");
 
     // Event queue
     let (tx, mut rx) = tokio::sync::mpsc::channel(100);
@@ -154,6 +187,7 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
     #[cfg(feature = "telegram")]
     if let Some(ref tg_config) = config.channels.telegram {
         if tg_config.enabled {
+            tracing::info!("Initializing Telegram channel...");
             let token = tg_config
                 .token
                 .clone()
@@ -164,18 +198,29 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
                     )
                 })?;
 
+            tracing::info!(
+                allow_from = ?tg_config.allow_from,
+                allow_count = tg_config.allow_from.len(),
+                "Telegram config: allow_from={:?}",
+                tg_config.allow_from,
+            );
+
             let tg_channel: Arc<dyn Channel> =
-                Arc::new(nocelium_channels::telegram::TelegramChannel::new(&token));
+                Arc::new(nocelium_channels::telegram::TelegramChannel::new(&token, tg_config.allow_from.clone()));
             channels.insert("telegram".into(), Arc::clone(&tg_channel));
 
             let tg_tx = tx.clone();
             let tg = Arc::clone(&tg_channel);
             tokio::spawn(async move {
+                tracing::info!("Telegram listener starting...");
                 if let Err(e) = tg.listen(tg_tx).await {
                     tracing::error!(error = %e, "Telegram listener failed");
                 }
             });
+            tracing::info!(elapsed_ms = startup.elapsed().as_millis(), "Telegram channel initialized");
             println!("Channel: telegram");
+        } else {
+            tracing::info!("Telegram channel disabled in config");
         }
     }
 
@@ -200,6 +245,7 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
 
     drop(tx);
 
+    tracing::info!(elapsed_ms = startup.elapsed().as_millis(), channels = channels.len(), "All channels ready, entering agent loop");
     let dispatcher = Dispatcher::default_agent_turn();
 
     nocelium_core::agent::run_loop(
@@ -208,6 +254,7 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
         &channels,
         &dispatcher,
         memory.as_deref(),
+        tg_ctx.as_ref(),
     )
     .await?;
 
@@ -326,6 +373,11 @@ WantedBy=default.target
         ServiceAction::Stop => {
             run_systemctl(&["stop", SERVICE_NAME])?;
             println!("Service stopped");
+        }
+
+        ServiceAction::Restart => {
+            run_systemctl(&["restart", SERVICE_NAME])?;
+            println!("Service restarted");
         }
 
         ServiceAction::Status => {

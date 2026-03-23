@@ -3,8 +3,10 @@ mod shell;
 mod filesystem;
 mod nomen_search;
 mod nomen_store;
+pub mod telegram;
 
 pub use shell::ShellTool;
 pub use filesystem::{ReadFileTool, WriteFileTool};
 pub use nomen_search::NomenSearchTool;
 pub use nomen_store::NomenStoreTool;
+pub use telegram::{TelegramContext, TelegramSendTool, TelegramEditTool, TelegramDeleteTool, TelegramReactTool};

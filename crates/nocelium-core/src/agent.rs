@@ -2,22 +2,50 @@ use anyhow::Result;
 use rig::providers::openai;
 use rig::agent::Agent;
 use rig::client::CompletionClient;
-use rig::completion::Prompt;
+use rig::completion::{Chat, Message};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use crate::config::Config;
 use crate::dispatch::{DispatchAction, Dispatcher};
 use crate::identity::Identity;
 use nocelium_channels::{Channel, Event, OutboundMessage, Payload};
 use nocelium_memory::MemoryClient;
-use nocelium_tools::{ShellTool, ReadFileTool, WriteFileTool, NomenSearchTool, NomenStoreTool};
+use nocelium_tools::{ShellTool, ReadFileTool, WriteFileTool, NomenSearchTool, NomenStoreTool,
+    TelegramContext, TelegramSendTool, TelegramEditTool, TelegramDeleteTool, TelegramReactTool};
+
+/// Per-chat conversation history.
+type ChatHistories = Arc<RwLock<HashMap<String, Vec<Message>>>>;
+
+/// Load the initial context memory from Nomen (`internal/{npub}/context`).
+/// Returns the content string, or None if not found.
+pub async fn load_initial_context(memory: &MemoryClient, npub: &str) -> Option<String> {
+    let topic = format!("internal/{}/context", npub);
+    tracing::info!(topic = %topic, "Loading initial context from Nomen");
+    match memory.get(&topic).await {
+        Ok(Some(mem)) => {
+            tracing::info!(topic = %topic, len = mem.detail.len(), "Loaded initial context");
+            Some(mem.detail)
+        }
+        Ok(None) => {
+            tracing::info!(topic = %topic, "No initial context found");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, topic = %topic, "Failed to load initial context");
+            None
+        }
+    }
+}
 
 /// Build a rig Agent from config using OpenAI-compatible provider (OpenRouter)
 pub fn build_agent(
     config: &Config,
     identity: &Identity,
     memory: Option<Arc<MemoryClient>>,
+    tg_ctx: Option<TelegramContext>,
+    initial_context: Option<&str>,
 ) -> Result<Agent<openai::completion::CompletionModel>> {
     let api_key = config
         .provider
@@ -37,11 +65,19 @@ pub fn build_agent(
         .base_url(base_url)
         .build()?;
 
-    let preamble = format!(
+    // Assemble preamble: config preamble + identity + initial context from Nomen
+    let mut preamble = format!(
         "{}\n\nYour Nostr identity (npub): {}",
         config.agent.preamble,
         identity.npub()
     );
+
+    if let Some(ctx) = initial_context {
+        preamble.push_str("\n\n## Context\n");
+        preamble.push_str(ctx);
+    }
+
+    tracing::debug!(preamble_len = preamble.len(), "Assembled preamble");
 
     let mut builder = client
         .agent(&config.provider.model)
@@ -58,18 +94,29 @@ pub fn build_agent(
             .tool(NomenStoreTool::new(Arc::clone(mem)));
     }
 
+    if let Some(ctx) = tg_ctx {
+        builder = builder
+            .tool(TelegramSendTool::new(ctx.clone()))
+            .tool(TelegramEditTool::new(ctx.clone()))
+            .tool(TelegramDeleteTool::new(ctx.clone()))
+            .tool(TelegramReactTool::new(ctx));
+    }
+
     Ok(builder.build())
 }
 
-/// The main agent loop: receive events → dispatch → enrich → think → respond
+/// The main agent loop: receive events → dispatch → think → respond
 pub async fn run_loop(
     agent: &Agent<openai::completion::CompletionModel>,
     event_rx: &mut tokio::sync::mpsc::Receiver<Event>,
     channels: &HashMap<String, Arc<dyn Channel>>,
     dispatcher: &Dispatcher,
-    memory: Option<&MemoryClient>,
+    _memory: Option<&MemoryClient>,
+    tg_ctx: Option<&TelegramContext>,
 ) -> Result<()> {
     tracing::info!("Agent loop started. Waiting for events...");
+
+    let histories: ChatHistories = Arc::new(RwLock::new(HashMap::new()));
 
     while let Some(event) = event_rx.recv().await {
         let rule = dispatcher.match_rule(&event.key);
@@ -98,29 +145,88 @@ pub async fn run_loop(
                     continue;
                 }
 
-                tracing::debug!(message = %text, source = %event.key, "Processing message");
+                // Handle /reset command
+                if text.trim() == "/reset" {
+                    let chat_key = event.source.chat_id().unwrap_or("local").to_string();
+                    let cleared = {
+                        let mut h = histories.write().await;
+                        h.remove(&chat_key).map(|v| v.len()).unwrap_or(0)
+                    };
+                    tracing::info!(chat = %chat_key, messages_cleared = cleared, "Session reset");
+                    let channel_name = event.source.channel_name().unwrap_or("stdio");
+                    if let Some(channel) = channels.get(channel_name) {
+                        let _ = channel.send(&OutboundMessage {
+                            chat_id: chat_key,
+                            text: format!("🔄 Session reset ({} messages cleared)", cleared),
+                            ..Default::default()
+                        }).await;
+                    }
+                    continue;
+                }
 
-                // Context enrichment
-                let enriched = match memory {
-                    Some(mem) => enrich_with_context(mem, text).await,
-                    None => text.clone(),
+                // Set Telegram context for tools if this is a Telegram message
+                if let (Some(ctx), Some(channel)) = (tg_ctx, channels.get("telegram")) {
+                    let chat_id = event.source.chat_id().unwrap_or("").to_string();
+                    let msg = match &event.payload {
+                        Payload::Message(m) => Some(m),
+                        _ => None,
+                    };
+                    ctx.set(
+                        Arc::clone(channel),
+                        chat_id,
+                        msg.map(|m| m.id.clone()),
+                        msg.and_then(|m| m.thread_id.clone()),
+                    ).await;
+                }
+
+                let chat_key = event.source.chat_id().unwrap_or("local").to_string();
+                tracing::debug!(message = %text, chat = %chat_key, "Processing message");
+
+                // Get conversation history for this chat
+                let history = {
+                    let h = histories.read().await;
+                    h.get(&chat_key).cloned().unwrap_or_default()
                 };
 
-                // Call LLM
-                let response = match agent.prompt(&enriched).await {
+                tracing::debug!(chat = %chat_key, history_len = history.len(), "Chat history");
+
+                // Call LLM with conversation history
+                let response = match agent.chat(text, history.clone()).await {
                     Ok(resp) => resp,
                     Err(e) => {
-                        tracing::error!(error = %e, "Agent prompt failed");
+                        tracing::error!(error = %e, "Agent chat failed");
                         format!("Error: {}", e)
                     }
                 };
 
+                // Update conversation history
+                {
+                    let mut h = histories.write().await;
+                    let entry = h.entry(chat_key.clone()).or_default();
+                    entry.push(Message::User {
+                        content: rig::one_or_many::OneOrMany::one(
+                            rig::completion::message::UserContent::text(text)
+                        ),
+                    });
+                    entry.push(Message::Assistant {
+                        id: None,
+                        content: rig::one_or_many::OneOrMany::one(
+                            rig::completion::message::AssistantContent::text(&response)
+                        ),
+                    });
+
+                    // Keep history bounded (last 50 messages = 25 turns)
+                    if entry.len() > 50 {
+                        let drain_count = entry.len() - 50;
+                        entry.drain(..drain_count);
+                    }
+                }
+
                 // Route response back to the source channel
                 let channel_name = event.source.channel_name().unwrap_or("stdio");
                 if let Some(channel) = channels.get(channel_name) {
-                    let chat_id = event.source.chat_id().unwrap_or("local").to_string();
                     let outbound = OutboundMessage {
-                        chat_id,
+                        chat_id: chat_key,
                         text: response,
                         ..Default::default()
                     };
@@ -136,29 +242,4 @@ pub async fn run_loop(
 
     tracing::info!("Event channel closed, agent loop ending");
     Ok(())
-}
-
-/// Search memory for context relevant to the user message.
-async fn enrich_with_context(mem: &MemoryClient, message: &str) -> String {
-    tracing::debug!(query = %message.trim(), "Searching memory for context");
-    match mem.search(message.trim(), 5, None, None).await {
-        Ok(memories) if !memories.is_empty() => {
-            tracing::info!(count = memories.len(), "Found relevant memories");
-            let context: Vec<String> = memories
-                .iter()
-                .map(|m| format!("- [{}]: {}", m.topic, m.detail))
-                .collect();
-            let enriched = format!("{message}\n\n## Relevant Context\n{}", context.join("\n"));
-            tracing::debug!(enriched = %enriched, "Enriched prompt");
-            enriched
-        }
-        Ok(_) => {
-            tracing::debug!("No relevant memories found");
-            message.to_string()
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "Memory search failed, proceeding without context");
-            message.to_string()
-        }
-    }
 }

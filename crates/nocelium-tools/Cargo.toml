@@ -16,3 +16,4 @@ async-trait = { workspace = true }
 schemars = { workspace = true }
 thiserror = { workspace = true }
 nocelium-memory = { workspace = true }
+nocelium-channels = { workspace = true }

@@ -80,6 +80,27 @@ pub struct TelegramConfig {
     #[serde(default)]
     pub enabled: bool,
     pub token: Option<String>,
+    /// If set, only respond to messages from these user IDs.
+    /// Accepts a single integer or an array: `allow_from = 123` or `allow_from = [123, 456]`
+    #[serde(default, deserialize_with = "deserialize_one_or_many_u64")]
+    pub allow_from: Vec<u64>,
+}
+
+fn deserialize_one_or_many_u64<'de, D>(deserializer: D) -> Result<Vec<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(u64),
+        Many(Vec<u64>),
+    }
+
+    match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(id) => Ok(vec![id]),
+        OneOrMany::Many(ids) => Ok(ids),
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

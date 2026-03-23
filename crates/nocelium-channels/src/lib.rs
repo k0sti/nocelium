@@ -45,6 +45,11 @@ pub trait Channel: Send + Sync {
         anyhow::bail!("delete not supported")
     }
 
+    /// React to a message with an emoji
+    async fn react(&self, _chat_id: &str, _message_id: &str, _emoji: &str) -> Result<()> {
+        anyhow::bail!("react not supported")
+    }
+
     /// Send typing indicator
     async fn start_typing(&self, _chat_id: &str) -> Result<()> {
         Ok(())
