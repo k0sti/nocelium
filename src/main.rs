@@ -260,6 +260,13 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
         Dispatcher::new(config.dispatch.rules.clone())
     };
 
+    let agent_state = nocelium_core::agent::AgentState {
+        model: config.provider.model.clone(),
+        memory_connected: memory.is_some(),
+        start_time: startup,
+        npub: identity.npub(),
+    };
+
     nocelium_core::agent::run_loop(
         &agent,
         &mut rx,
@@ -267,6 +274,7 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
         &dispatcher,
         memory.as_deref(),
         tg_ctx.as_ref(),
+        agent_state,
     )
     .await?;
 

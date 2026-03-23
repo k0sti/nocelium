@@ -5,7 +5,9 @@ use rig::client::CompletionClient;
 use rig::completion::{Chat, Message};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::dispatch::{DispatchAction, Dispatcher};
@@ -18,8 +20,22 @@ use nocelium_tools::{ShellTool, ReadFileTool, WriteFileTool, NomenSearchTool, No
 /// Per-chat conversation history.
 type ChatHistories = Arc<RwLock<HashMap<String, Vec<Message>>>>;
 
+/// Tracks active agent work for /stop cancellation.
+struct ActiveTask {
+    chat_id: String,
+    cancel: CancellationToken,
+    started: Instant,
+}
+
+/// Agent state shared across the loop.
+pub struct AgentState {
+    pub model: String,
+    pub memory_connected: bool,
+    pub start_time: Instant,
+    pub npub: String,
+}
+
 /// Load the initial context memory from Nomen (`internal/{npub}/context`).
-/// Returns the content string, or None if not found.
 pub async fn load_initial_context(memory: &MemoryClient, npub: &str) -> Option<String> {
     let topic = format!("internal/{}/context", npub);
     tracing::info!(topic = %topic, "Loading initial context from Nomen");
@@ -65,7 +81,6 @@ pub fn build_agent(
         .base_url(base_url)
         .build()?;
 
-    // Assemble preamble: config preamble + identity + initial context from Nomen
     let mut preamble = format!(
         "{}\n\nYour Nostr identity (npub): {}",
         config.agent.preamble,
@@ -113,10 +128,12 @@ pub async fn run_loop(
     dispatcher: &Dispatcher,
     _memory: Option<&MemoryClient>,
     tg_ctx: Option<&TelegramContext>,
+    state: AgentState,
 ) -> Result<()> {
     tracing::info!("Agent loop started. Waiting for events...");
 
     let histories: ChatHistories = Arc::new(RwLock::new(HashMap::new()));
+    let active_tasks: Arc<RwLock<Vec<ActiveTask>>> = Arc::new(RwLock::new(Vec::new()));
 
     while let Some(event) = event_rx.recv().await {
         let rule = dispatcher.match_rule(&event.key);
@@ -132,7 +149,6 @@ pub async fn run_loop(
                 continue;
             }
             DispatchAction::AgentTurn => {
-                // Extract text from message payload
                 let text = match &event.payload {
                     Payload::Message(msg) => &msg.text,
                     _ => {
@@ -145,33 +161,31 @@ pub async fn run_loop(
                     continue;
                 }
 
-                // Handle commands
                 let trimmed = text.trim();
+                let chat_key = event.source.chat_id().unwrap_or("local").to_string();
+                let channel_name = event.source.channel_name().unwrap_or("stdio").to_string();
+
+                // ── Commands ──
 
                 if trimmed == "/reload" {
                     tracing::info!("Reload requested, restarting process");
-                    let channel_name = event.source.channel_name().unwrap_or("stdio");
-                    if let Some(channel) = channels.get(channel_name) {
-                        let chat_key = event.source.chat_id().unwrap_or("local").to_string();
+                    if let Some(channel) = channels.get(channel_name.as_str()) {
                         let _ = channel.send(&OutboundMessage {
                             chat_id: chat_key,
                             text: "🔄 Reloading...".into(),
                             ..Default::default()
                         }).await;
                     }
-                    // Exit cleanly — systemd RestartSec=5 will restart us
                     std::process::exit(0);
                 }
 
                 if trimmed == "/reset" {
-                    let chat_key = event.source.chat_id().unwrap_or("local").to_string();
                     let cleared = {
                         let mut h = histories.write().await;
                         h.remove(&chat_key).map(|v| v.len()).unwrap_or(0)
                     };
                     tracing::info!(chat = %chat_key, messages_cleared = cleared, "Session reset");
-                    let channel_name = event.source.channel_name().unwrap_or("stdio");
-                    if let Some(channel) = channels.get(channel_name) {
+                    if let Some(channel) = channels.get(channel_name.as_str()) {
                         let _ = channel.send(&OutboundMessage {
                             chat_id: chat_key,
                             text: format!("🔄 Session reset ({} messages cleared)", cleared),
@@ -181,39 +195,132 @@ pub async fn run_loop(
                     continue;
                 }
 
-                // Set Telegram context for tools if this is a Telegram message
+                if trimmed == "/stop" {
+                    let cancelled = {
+                        let mut tasks = active_tasks.write().await;
+                        let count = tasks.len();
+                        let mut report = Vec::new();
+                        for task in tasks.drain(..) {
+                            let elapsed = task.started.elapsed();
+                            task.cancel.cancel();
+                            report.push(format!("  • chat {} ({:.1}s)", task.chat_id, elapsed.as_secs_f64()));
+                        }
+                        (count, report)
+                    };
+                    let msg = if cancelled.0 == 0 {
+                        "🛑 No active tasks".into()
+                    } else {
+                        format!("🛑 Stopped {} task(s):\n{}", cancelled.0, cancelled.1.join("\n"))
+                    };
+                    tracing::info!(stopped = cancelled.0, "Stop command");
+                    if let Some(channel) = channels.get(channel_name.as_str()) {
+                        let _ = channel.send(&OutboundMessage {
+                            chat_id: chat_key,
+                            text: msg,
+                            ..Default::default()
+                        }).await;
+                    }
+                    continue;
+                }
+
+                if trimmed == "/status" {
+                    let uptime = state.start_time.elapsed();
+                    let history_info = {
+                        let h = histories.read().await;
+                        let total_msgs: usize = h.values().map(|v| v.len()).sum();
+                        (h.len(), total_msgs)
+                    };
+                    let active_count = active_tasks.read().await.len();
+
+                    let status = format!(
+                        "📊 *Nocelium Status*\n\
+                        \n\
+                        *Identity:* `{}`\n\
+                        *Model:* {}\n\
+                        *Uptime:* {}m {}s\n\
+                        *Memory:* {}\n\
+                        *Active tasks:* {}\n\
+                        *Chats:* {} ({} messages)",
+                        state.npub,
+                        state.model,
+                        uptime.as_secs() / 60,
+                        uptime.as_secs() % 60,
+                        if state.memory_connected { "connected" } else { "unavailable" },
+                        active_count,
+                        history_info.0,
+                        history_info.1,
+                    );
+                    if let Some(channel) = channels.get(channel_name.as_str()) {
+                        let _ = channel.send(&OutboundMessage {
+                            chat_id: chat_key,
+                            text: status,
+                            ..Default::default()
+                        }).await;
+                    }
+                    continue;
+                }
+
+                // ── Agent Turn ──
+
+                // Set Telegram context for tools
                 if let (Some(ctx), Some(channel)) = (tg_ctx, channels.get("telegram")) {
-                    let chat_id = event.source.chat_id().unwrap_or("").to_string();
                     let msg = match &event.payload {
                         Payload::Message(m) => Some(m),
                         _ => None,
                     };
                     ctx.set(
                         Arc::clone(channel),
-                        chat_id,
+                        chat_key.clone(),
                         msg.map(|m| m.id.clone()),
                         msg.and_then(|m| m.thread_id.clone()),
                     ).await;
                 }
 
-                let chat_key = event.source.chat_id().unwrap_or("local").to_string();
                 tracing::debug!(message = %text, chat = %chat_key, "Processing message");
 
-                // Get conversation history for this chat
                 let history = {
                     let h = histories.read().await;
                     h.get(&chat_key).cloned().unwrap_or_default()
                 };
 
-                tracing::debug!(chat = %chat_key, history_len = history.len(), "Chat history");
+                // Register cancellable task
+                let cancel_token = CancellationToken::new();
+                {
+                    let mut tasks = active_tasks.write().await;
+                    tasks.push(ActiveTask {
+                        chat_id: chat_key.clone(),
+                        cancel: cancel_token.clone(),
+                        started: Instant::now(),
+                    });
+                }
 
-                // Call LLM with conversation history
-                let response = match agent.chat(text, history.clone()).await {
-                    Ok(resp) => resp,
-                    Err(e) => {
-                        tracing::error!(error = %e, "Agent chat failed");
-                        format!("Error: {}", e)
+                // Run LLM with cancellation support
+                let text_owned = text.to_string();
+                let response = tokio::select! {
+                    result = agent.chat(&text_owned, history.clone()) => {
+                        match result {
+                            Ok(resp) => Some(resp),
+                            Err(e) => {
+                                tracing::error!(error = %e, "Agent chat failed");
+                                Some(format!("Error: {}", e))
+                            }
+                        }
                     }
+                    _ = cancel_token.cancelled() => {
+                        tracing::info!(chat = %chat_key, "Agent turn cancelled by /stop");
+                        None
+                    }
+                };
+
+                // Remove from active tasks
+                {
+                    let mut tasks = active_tasks.write().await;
+                    tasks.retain(|t| t.chat_id != chat_key);
+                }
+
+                let response = match response {
+                    Some(r) => r,
+                    None => continue, // cancelled, no response
                 };
 
                 // Update conversation history
@@ -222,7 +329,7 @@ pub async fn run_loop(
                     let entry = h.entry(chat_key.clone()).or_default();
                     entry.push(Message::User {
                         content: rig::one_or_many::OneOrMany::one(
-                            rig::completion::message::UserContent::text(text)
+                            rig::completion::message::UserContent::text(&text_owned)
                         ),
                     });
                     entry.push(Message::Assistant {
@@ -232,16 +339,14 @@ pub async fn run_loop(
                         ),
                     });
 
-                    // Keep history bounded (last 50 messages = 25 turns)
                     if entry.len() > 50 {
                         let drain_count = entry.len() - 50;
                         entry.drain(..drain_count);
                     }
                 }
 
-                // Route response back to the source channel
-                let channel_name = event.source.channel_name().unwrap_or("stdio");
-                if let Some(channel) = channels.get(channel_name) {
+                // Send response
+                if let Some(channel) = channels.get(channel_name.as_str()) {
                     let outbound = OutboundMessage {
                         chat_id: chat_key,
                         text: response,

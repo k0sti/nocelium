@@ -57,6 +57,8 @@ impl Channel for TelegramChannel {
         let commands = vec![
             BotCommand::new("reset", "Reset conversation history"),
             BotCommand::new("reload", "Reload configuration"),
+            BotCommand::new("stop", "Stop active processing"),
+            BotCommand::new("status", "Show agent status"),
         ];
         if let Err(e) = self.bot.set_my_commands(commands).await {
             tracing::warn!(error = %e, "Failed to register bot commands");
