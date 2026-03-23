@@ -142,6 +142,14 @@ impl Config {
         Ok(config)
     }
 
+    /// Load from explicit path or default locations. Used for config validation.
+    pub fn load_from_path(path: Option<&Path>) -> anyhow::Result<Self> {
+        match path {
+            Some(p) => Self::load(p),
+            None => Self::load_default(),
+        }
+    }
+
     /// Load config from default locations, falling back to defaults
     pub fn load_default() -> anyhow::Result<Self> {
         let candidates = [

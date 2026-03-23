@@ -4,6 +4,7 @@ use rig::agent::Agent;
 use rig::client::CompletionClient;
 use rig::completion::{Chat, Message};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -34,6 +35,7 @@ pub struct AgentState {
     pub memory_connected: bool,
     pub start_time: Instant,
     pub npub: String,
+    pub config_path: Option<PathBuf>,
 }
 
 /// Load the initial context memory from Nomen (`internal/{npub}/context`).
@@ -121,13 +123,69 @@ pub fn build_agent(
     Ok(builder.build())
 }
 
+/// Path to reload state file (written before exit, read on startup).
+fn reload_state_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".nocelium/reload_state.json")
+}
+
+/// Save reload state so the next startup can send confirmation.
+fn save_reload_state(chat_id: &str, channel: &str) {
+    let state = serde_json::json!({
+        "chat_id": chat_id,
+        "channel": channel,
+        "ts": chrono::Utc::now().to_rfc3339(),
+    });
+    if let Ok(json) = serde_json::to_string(&state) {
+        let path = reload_state_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+/// Check for reload state and send confirmation. Returns true if confirmation was sent.
+pub async fn send_reload_confirmation(channels: &HashMap<String, Arc<dyn Channel>>) -> bool {
+    let path = reload_state_path();
+    if !path.exists() {
+        return false;
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => { let _ = std::fs::remove_file(&path); return false; }
+    };
+    let _ = std::fs::remove_file(&path);
+
+    let state: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    let chat_id = state.get("chat_id").and_then(|v| v.as_str()).unwrap_or("");
+    let channel_name = state.get("channel").and_then(|v| v.as_str()).unwrap_or("");
+
+    if let Some(channel) = channels.get(channel_name) {
+        let _ = channel.send(&OutboundMessage {
+            chat_id: chat_id.to_string(),
+            text: "✅ Reloaded successfully".into(),
+            ..Default::default()
+        }).await;
+        tracing::info!(chat_id, channel = channel_name, "Sent reload confirmation");
+        true
+    } else {
+        false
+    }
+}
+
 /// The main agent loop: receive events → dispatch → think → respond
 pub async fn run_loop(
     agent: &Agent<openai::completion::CompletionModel>,
     event_rx: &mut tokio::sync::mpsc::Receiver<Event>,
     channels: &HashMap<String, Arc<dyn Channel>>,
     dispatcher: &Dispatcher,
-    _memory: Option<&MemoryClient>,
+    memory: Option<&MemoryClient>,
     tg_ctx: Option<&TelegramContext>,
     state: AgentState,
 ) -> Result<()> {
@@ -157,7 +215,24 @@ pub async fn run_loop(
                 continue;
             }
             DispatchAction::Handler(name) => {
-                tracing::warn!(handler = %name, "Handler dispatch not yet implemented");
+                let handler_start = Instant::now();
+                let mut error_msg = None;
+
+                if let Some(prefix) = name.strip_prefix("store:") {
+                    if let Some(mem) = memory {
+                        if let Err(e) = crate::handlers::handle_store(&event, mem, prefix).await {
+                            tracing::error!(error = %e, handler = %name, "Store handler failed");
+                            error_msg = Some(e.to_string());
+                        }
+                    } else {
+                        tracing::warn!(handler = %name, "Store handler requires memory, but memory is unavailable");
+                        error_msg = Some("Memory unavailable".into());
+                    }
+                } else {
+                    tracing::warn!(handler = %name, "Unknown handler");
+                    error_msg = Some("Unknown handler".into());
+                }
+
                 dispatch_log.log(DispatchLogEntry {
                     ts: chrono::Utc::now().to_rfc3339(),
                     key: event.key.clone(),
@@ -165,8 +240,14 @@ pub async fn run_loop(
                     action: format!("handler:{name}"),
                     channel: event.source.channel_name().map(|s| s.to_string()),
                     chat_id: event.source.chat_id().map(|s| s.to_string()),
-                    sender_id: None, sender_name: None, message: None,
-                    response: None, duration_ms: None, error: None,
+                    sender_id: None, sender_name: None,
+                    message: match &event.payload {
+                        Payload::Message(m) => Some(preview(&m.text, 200)),
+                        _ => None,
+                    },
+                    response: None,
+                    duration_ms: Some(handler_start.elapsed().as_millis() as u64),
+                    error: error_msg,
                 });
                 continue;
             }
@@ -190,15 +271,35 @@ pub async fn run_loop(
                 // ── Commands ──
 
                 if trimmed == "/reload" {
-                    tracing::info!("Reload requested, restarting process");
-                    if let Some(channel) = channels.get(channel_name.as_str()) {
-                        let _ = channel.send(&OutboundMessage {
-                            chat_id: chat_key,
-                            text: "🔄 Reloading...".into(),
-                            ..Default::default()
-                        }).await;
+                    tracing::info!("Reload requested, validating config...");
+
+                    // Validate config before restarting
+                    let config_path = state.config_path.clone();
+                    match Config::load_from_path(config_path.as_deref()) {
+                        Ok(_) => {
+                            if let Some(channel) = channels.get(channel_name.as_str()) {
+                                let _ = channel.send(&OutboundMessage {
+                                    chat_id: chat_key.clone(),
+                                    text: "🔄 Reloading...".into(),
+                                    ..Default::default()
+                                }).await;
+                            }
+                            save_reload_state(&chat_key, &channel_name);
+                            std::process::exit(0);
+                        }
+                        Err(e) => {
+                            let msg = format!("❌ Config validation failed:\n```\n{e}\n```\nNot reloading.");
+                            tracing::error!(error = %e, "Config validation failed");
+                            if let Some(channel) = channels.get(channel_name.as_str()) {
+                                let _ = channel.send(&OutboundMessage {
+                                    chat_id: chat_key,
+                                    text: msg,
+                                    ..Default::default()
+                                }).await;
+                            }
+                            continue;
+                        }
                     }
-                    std::process::exit(0);
                 }
 
                 if trimmed == "/reset" {

@@ -264,11 +264,15 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
         Dispatcher::new(config.dispatch.rules.clone())
     };
 
+    // Send reload confirmation if this is a restart after /reload
+    nocelium_core::agent::send_reload_confirmation(&channels).await;
+
     let agent_state = nocelium_core::agent::AgentState {
         model: config.provider.model.clone(),
         memory_connected: memory.is_some(),
         start_time: startup,
         npub: identity.npub(),
+        config_path: config_path.clone(),
     };
 
     nocelium_core::agent::run_loop(
