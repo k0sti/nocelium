@@ -134,9 +134,15 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
     let memory = if config.memory.enabled {
         tracing::info!("Connecting to Nomen at {}...", config.memory.socket_path);
         let client = nocelium_memory::MemoryClient::new(&config.memory.socket_path, 3);
-        tracing::info!(elapsed_ms = startup.elapsed().as_millis(), "Memory client created");
-        println!("Memory: enabled ({})", config.memory.socket_path);
-        Some(Arc::new(client))
+        if client.health_check().await {
+            tracing::info!(elapsed_ms = startup.elapsed().as_millis(), "Memory: connected");
+            println!("Memory: connected ({})", config.memory.socket_path);
+            Some(Arc::new(client))
+        } else {
+            tracing::warn!("Memory: enabled but Nomen unreachable, continuing without memory");
+            println!("Memory: UNAVAILABLE (Nomen unreachable at {})", config.memory.socket_path);
+            None
+        }
     } else {
         println!("Memory: disabled");
         None
@@ -246,7 +252,13 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
     drop(tx);
 
     tracing::info!(elapsed_ms = startup.elapsed().as_millis(), channels = channels.len(), "All channels ready, entering agent loop");
-    let dispatcher = Dispatcher::default_agent_turn();
+    let dispatcher = if config.dispatch.rules.is_empty() {
+        tracing::info!("No dispatch rules configured, using default (all → agent_turn)");
+        Dispatcher::default_agent_turn()
+    } else {
+        tracing::info!(rules = config.dispatch.rules.len(), "Loaded dispatch rules from config");
+        Dispatcher::new(config.dispatch.rules.clone())
+    };
 
     nocelium_core::agent::run_loop(
         &agent,

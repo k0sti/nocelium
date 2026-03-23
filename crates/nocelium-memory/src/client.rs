@@ -141,6 +141,17 @@ impl MemoryClient {
         serde_json::from_value(memories).map_err(|e| MemoryError::Deserialize(e.to_string()))
     }
 
+    /// Health check — try a lightweight search to verify Nomen is reachable.
+    pub async fn health_check(&self) -> bool {
+        match self.search("health", 1, None, None).await {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, "Nomen health check failed");
+                false
+            }
+        }
+    }
+
     /// Delete a memory by topic.
     pub async fn delete(&self, topic: &str) -> Result<(), MemoryError> {
         let resp = self

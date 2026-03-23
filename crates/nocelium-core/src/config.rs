@@ -12,6 +12,8 @@ pub struct Config {
     pub channels: ChannelsConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(default)]
+    pub dispatch: DispatchConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -125,6 +127,12 @@ pub struct ToolsConfig {
 
 fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct DispatchConfig {
+    #[serde(default)]
+    pub rules: Vec<crate::dispatch::DispatchRule>,
 }
 
 impl Config {

@@ -42,8 +42,22 @@ impl Event {
         };
         match source {
             Source::Channel {
-                name, chat_id, ..
-            } => format!("{name}:{kind}:{chat_id}"),
+                name,
+                chat_id,
+                sender_id,
+            } => {
+                // Detect DMs from message payload
+                if let Payload::Message(msg) = payload {
+                    if msg.chat_type == ChatType::Direct {
+                        return format!("{name}:{kind}:direct:{sender_id}");
+                    }
+                    // Include thread_id if present
+                    if let Some(ref thread_id) = msg.thread_id {
+                        return format!("{name}:{kind}:{chat_id}:{thread_id}");
+                    }
+                }
+                format!("{name}:{kind}:{chat_id}")
+            }
             Source::Cron(id) => format!("cron:{id}"),
             Source::Webhook(name) => format!("webhook:{name}"),
             Source::Nostr(filter) => format!("nostr:{filter}"),
