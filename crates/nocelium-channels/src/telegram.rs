@@ -137,6 +137,13 @@ impl Channel for TelegramChannel {
             },
         );
 
+        // Drop pending updates from before this boot
+        if let Err(e) = self.bot.delete_webhook().drop_pending_updates(true).await {
+            tracing::warn!(error = %e, "Failed to drop pending updates");
+        } else {
+            tracing::info!("Dropped pending Telegram updates");
+        }
+
         let mut dispatcher = teloxide::dispatching::Dispatcher::builder(self.bot.clone(), handler)
             .enable_ctrlc_handler()
             .build();
