@@ -7,6 +7,8 @@ use crate::types::{Memory, Visibility};
 /// Client for the Nomen memory service over Unix socket.
 pub struct MemoryClient {
     wire: ReconnectingClient,
+    nsec: Option<String>,
+    authenticated: std::sync::atomic::AtomicBool,
 }
 
 impl MemoryClient {
@@ -14,7 +16,48 @@ impl MemoryClient {
     pub fn new(socket_path: &str, max_retries: usize) -> Self {
         Self {
             wire: ReconnectingClient::new(socket_path, max_retries),
+            nsec: None,
+            authenticated: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Create a new client with nsec for per-session identity.
+    pub fn with_nsec(socket_path: &str, max_retries: usize, nsec: String) -> Self {
+        Self {
+            wire: ReconnectingClient::new(socket_path, max_retries),
+            nsec: Some(nsec),
+            authenticated: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Authenticate with Nomen using identity.auth if nsec is configured.
+    /// Called automatically before the first request.
+    async fn ensure_auth(&self) -> Result<(), MemoryError> {
+        if self.nsec.is_none() || self.authenticated.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
+        let nsec = self.nsec.as_ref().unwrap();
+        let resp = self.wire.request("identity.auth", json!({"nsec": nsec})).await
+            .map_err(|e| MemoryError::Connection(e.to_string()))?;
+        if resp.ok {
+            self.authenticated.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(result) = &resp.result {
+                tracing::info!(npub = %result.get("npub").and_then(|v| v.as_str()).unwrap_or("?"), "Nomen identity authenticated");
+            }
+        } else {
+            // Auth not supported (old Nomen) or failed — continue without per-session identity
+            let msg = resp.error.map(|e| e.message).unwrap_or_else(|| "Unknown".into());
+            tracing::warn!("Nomen identity.auth failed: {msg} (continuing with default identity)");
+            self.authenticated.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Send a request to Nomen, ensuring auth is done first.
+    async fn request(&self, action: &str, params: Value) -> Result<nomen_wire::Response, MemoryError> {
+        self.ensure_auth().await?;
+        self.wire.request(action, params).await
+            .map_err(|e| MemoryError::Connection(e.to_string()))
     }
 
     /// Extract result from a nomen-wire Response, mapping errors.
@@ -51,11 +94,7 @@ impl MemoryClient {
             params["scope"] = json!(s);
         }
 
-        let resp = self
-            .wire
-            .request("memory.search", params)
-            .await
-            .map_err(|e| MemoryError::Connection(e.to_string()))?;
+        let resp = self.request("memory.search", params).await?;
 
         let result = Self::extract_result(resp)?;
         let results = result
@@ -84,11 +123,7 @@ impl MemoryClient {
             params["scope"] = json!(s);
         }
 
-        let resp = self
-            .wire
-            .request("memory.put", params)
-            .await
-            .map_err(|e| MemoryError::Connection(e.to_string()))?;
+        let resp = self.request("memory.put", params).await?;
 
         let result = Self::extract_result(resp)?;
         let d_tag = result
@@ -101,11 +136,7 @@ impl MemoryClient {
 
     /// Get a memory by topic.
     pub async fn get(&self, topic: &str) -> Result<Option<Memory>, MemoryError> {
-        let resp = self
-            .wire
-            .request("memory.get", json!({"topic": topic}))
-            .await
-            .map_err(|e| MemoryError::Connection(e.to_string()))?;
+        let resp = self.request("memory.get", json!({"topic": topic})).await?;
 
         let result = Self::extract_result(resp)?;
         if result.is_null() {
@@ -127,11 +158,7 @@ impl MemoryClient {
             params["visibility"] = json!(vis.as_str());
         }
 
-        let resp = self
-            .wire
-            .request("memory.list", params)
-            .await
-            .map_err(|e| MemoryError::Connection(e.to_string()))?;
+        let resp = self.request("memory.list", params).await?;
 
         let result = Self::extract_result(resp)?;
         let memories = result
@@ -154,11 +181,7 @@ impl MemoryClient {
 
     /// Delete a memory by topic.
     pub async fn delete(&self, topic: &str) -> Result<(), MemoryError> {
-        let resp = self
-            .wire
-            .request("memory.delete", json!({"topic": topic}))
-            .await
-            .map_err(|e| MemoryError::Connection(e.to_string()))?;
+        let resp = self.request("memory.delete", json!({"topic": topic})).await?;
 
         Self::extract_result(resp)?;
         Ok(())

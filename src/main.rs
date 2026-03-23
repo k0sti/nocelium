@@ -133,7 +133,11 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
 
     let memory = if config.memory.enabled {
         tracing::info!("Connecting to Nomen at {}...", config.memory.socket_path);
-        let client = nocelium_memory::MemoryClient::new(&config.memory.socket_path, 3);
+        let client = nocelium_memory::MemoryClient::with_nsec(
+            &config.memory.socket_path,
+            3,
+            identity.nsec(),
+        );
         if client.health_check().await {
             tracing::info!(elapsed_ms = startup.elapsed().as_millis(), "Memory: connected");
             println!("Memory: connected ({})", config.memory.socket_path);

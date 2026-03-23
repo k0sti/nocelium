@@ -77,4 +77,11 @@ impl Identity {
             .to_bech32()
             .unwrap_or_else(|_| format!("{}", self.keys.public_key()))
     }
+
+    pub fn nsec(&self) -> String {
+        self.keys
+            .secret_key()
+            .to_bech32()
+            .unwrap_or_else(|_| "invalid".to_string())
+    }
 }
