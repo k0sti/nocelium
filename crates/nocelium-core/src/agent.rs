@@ -145,8 +145,25 @@ pub async fn run_loop(
                     continue;
                 }
 
-                // Handle /reset command
-                if text.trim() == "/reset" {
+                // Handle commands
+                let trimmed = text.trim();
+
+                if trimmed == "/reload" {
+                    tracing::info!("Reload requested, restarting process");
+                    let channel_name = event.source.channel_name().unwrap_or("stdio");
+                    if let Some(channel) = channels.get(channel_name) {
+                        let chat_key = event.source.chat_id().unwrap_or("local").to_string();
+                        let _ = channel.send(&OutboundMessage {
+                            chat_id: chat_key,
+                            text: "🔄 Reloading...".into(),
+                            ..Default::default()
+                        }).await;
+                    }
+                    // Exit cleanly — systemd RestartSec=5 will restart us
+                    std::process::exit(0);
+                }
+
+                if trimmed == "/reset" {
                     let chat_key = event.source.chat_id().unwrap_or("local").to_string();
                     let cleared = {
                         let mut h = histories.write().await;
