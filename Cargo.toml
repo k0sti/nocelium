@@ -36,6 +36,7 @@ futures = "0.3"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 teloxide = { version = "0.13", features = ["macros"] }
+chrono = "0.4"
 dirs = "6"
 
 [package]

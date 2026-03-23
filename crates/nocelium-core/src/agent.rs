@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::Config;
 use crate::dispatch::{DispatchAction, Dispatcher};
 use crate::identity::Identity;
+use crate::logging::{DispatchLogger, DispatchLogEntry, preview};
 use nocelium_channels::{Channel, Event, OutboundMessage, Payload};
 use nocelium_memory::MemoryClient;
 use nocelium_tools::{ShellTool, ReadFileTool, WriteFileTool, NomenSearchTool, NomenStoreTool,
@@ -134,6 +135,7 @@ pub async fn run_loop(
 
     let histories: ChatHistories = Arc::new(RwLock::new(HashMap::new()));
     let active_tasks: Arc<RwLock<Vec<ActiveTask>>> = Arc::new(RwLock::new(Vec::new()));
+    let dispatch_log = DispatchLogger::new().await;
 
     while let Some(event) = event_rx.recv().await {
         let rule = dispatcher.match_rule(&event.key);
@@ -142,10 +144,30 @@ pub async fn run_loop(
         match &rule.action {
             DispatchAction::Drop => {
                 tracing::debug!(key = %event.key, "Dropping event");
+                dispatch_log.log(DispatchLogEntry {
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    key: event.key.clone(),
+                    rule: rule.pattern.clone(),
+                    action: "drop".into(),
+                    channel: event.source.channel_name().map(|s| s.to_string()),
+                    chat_id: event.source.chat_id().map(|s| s.to_string()),
+                    sender_id: None, sender_name: None, message: None,
+                    response: None, duration_ms: None, error: None,
+                });
                 continue;
             }
             DispatchAction::Handler(name) => {
                 tracing::warn!(handler = %name, "Handler dispatch not yet implemented");
+                dispatch_log.log(DispatchLogEntry {
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    key: event.key.clone(),
+                    rule: rule.pattern.clone(),
+                    action: format!("handler:{name}"),
+                    channel: event.source.channel_name().map(|s| s.to_string()),
+                    chat_id: event.source.chat_id().map(|s| s.to_string()),
+                    sender_id: None, sender_name: None, message: None,
+                    response: None, duration_ms: None, error: None,
+                });
                 continue;
             }
             DispatchAction::AgentTurn => {
@@ -277,6 +299,7 @@ pub async fn run_loop(
                 }
 
                 tracing::debug!(message = %text, chat = %chat_key, "Processing message");
+                let turn_start = Instant::now();
 
                 let history = {
                     let h = histories.read().await;
@@ -346,18 +369,49 @@ pub async fn run_loop(
                 }
 
                 // Send response
-                if let Some(channel) = channels.get(channel_name.as_str()) {
+                let send_error = if let Some(channel) = channels.get(channel_name.as_str()) {
                     let outbound = OutboundMessage {
-                        chat_id: chat_key,
-                        text: response,
+                        chat_id: chat_key.clone(),
+                        text: response.clone(),
                         ..Default::default()
                     };
-                    if let Err(e) = channel.send(&outbound).await {
-                        tracing::error!(error = %e, channel = %channel_name, "Failed to send response");
+                    match channel.send(&outbound).await {
+                        Ok(_) => None,
+                        Err(e) => {
+                            tracing::error!(error = %e, channel = %channel_name, "Failed to send response");
+                            Some(e.to_string())
+                        }
                     }
                 } else {
                     tracing::error!(channel = %channel_name, "No channel found for response routing");
-                }
+                    Some(format!("No channel: {channel_name}"))
+                };
+
+                // Log dispatch
+                let (sender_id, sender_name) = match &event.source {
+                    nocelium_channels::Source::Channel { sender_id, .. } => {
+                        let name = match &event.payload {
+                            Payload::Message(m) => m.sender_name.clone(),
+                            _ => None,
+                        };
+                        (Some(sender_id.clone()), name)
+                    }
+                    _ => (None, None),
+                };
+                dispatch_log.log(DispatchLogEntry {
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    key: event.key.clone(),
+                    rule: rule.pattern.clone(),
+                    action: "agent_turn".into(),
+                    channel: Some(channel_name.clone()),
+                    chat_id: Some(chat_key),
+                    sender_id,
+                    sender_name,
+                    message: Some(preview(&text_owned, 200)),
+                    response: Some(preview(&response, 200)),
+                    duration_ms: Some(turn_start.elapsed().as_millis() as u64),
+                    error: send_error,
+                });
             }
         }
     }
