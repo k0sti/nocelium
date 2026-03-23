@@ -78,12 +78,17 @@ impl Tool for ShellTool {
 
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        // Kill child process when the future is dropped (e.g. by /stop cancellation)
+        cmd.kill_on_drop(true);
 
         tracing::info!(command = %args.command, "Executing shell command");
 
+        let mut child = cmd.spawn()
+            .map_err(|e| ShellToolError::ExecutionError(e.to_string()))?;
+
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout),
-            cmd.output(),
+            child.wait_with_output(),
         )
         .await;
 
@@ -94,7 +99,10 @@ impl Tool for ShellTool {
                 exit_code: output.status.code(),
             }),
             Ok(Err(e)) => Err(ShellToolError::ExecutionError(e.to_string())),
-            Err(_) => Err(ShellToolError::Timeout(timeout)),
+            Err(_) => {
+                // Timeout — kill_on_drop handles cleanup
+                Err(ShellToolError::Timeout(timeout))
+            }
         }
     }
 }
