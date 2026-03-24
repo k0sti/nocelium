@@ -264,6 +264,34 @@ pub async fn run_loop(
                     continue;
                 }
 
+                // Log dispatch immediately (before LLM processing)
+                {
+                    let (sender_id, sender_name) = match &event.source {
+                        nocelium_channels::Source::Channel { sender_id, .. } => {
+                            let name = match &event.payload {
+                                Payload::Message(m) => m.sender_name.clone(),
+                                _ => None,
+                            };
+                            (Some(sender_id.clone()), name)
+                        }
+                        _ => (None, None),
+                    };
+                    dispatch_log.log(DispatchLogEntry {
+                        ts: chrono::Utc::now().to_rfc3339(),
+                        key: event.key.clone(),
+                        rule: rule.pattern.clone(),
+                        action: "agent_turn".into(),
+                        channel: event.source.channel_name().map(|s| s.to_string()),
+                        chat_id: event.source.chat_id().map(|s| s.to_string()),
+                        sender_id,
+                        sender_name,
+                        message: Some(preview(text, 200)),
+                        response: None,
+                        duration_ms: None,
+                        error: None,
+                    });
+                }
+
                 let trimmed = text.trim();
                 let chat_key = event.source.chat_id().unwrap_or("local").to_string();
                 let channel_name = event.source.channel_name().unwrap_or("stdio").to_string();
@@ -488,31 +516,21 @@ pub async fn run_loop(
                     Some(format!("No channel: {channel_name}"))
                 };
 
-                // Log dispatch
-                let (sender_id, sender_name) = match &event.source {
-                    nocelium_channels::Source::Channel { sender_id, .. } => {
-                        let name = match &event.payload {
-                            Payload::Message(m) => m.sender_name.clone(),
-                            _ => None,
-                        };
-                        (Some(sender_id.clone()), name)
-                    }
-                    _ => (None, None),
-                };
-                dispatch_log.log(DispatchLogEntry {
-                    ts: chrono::Utc::now().to_rfc3339(),
-                    key: event.key.clone(),
-                    rule: rule.pattern.clone(),
-                    action: "agent_turn".into(),
-                    channel: Some(channel_name.clone()),
-                    chat_id: Some(chat_key),
-                    sender_id,
-                    sender_name,
-                    message: Some(preview(&text_owned, 200)),
-                    response: Some(preview(&response, 200)),
-                    duration_ms: Some(turn_start.elapsed().as_millis() as u64),
-                    error: send_error,
-                });
+                // Log completion (separate from dispatch log above)
+                if send_error.is_some() {
+                    tracing::warn!(
+                        key = %event.key,
+                        duration_ms = turn_start.elapsed().as_millis() as u64,
+                        error = ?send_error,
+                        "Agent turn completed with send error"
+                    );
+                } else {
+                    tracing::debug!(
+                        key = %event.key,
+                        duration_ms = turn_start.elapsed().as_millis() as u64,
+                        "Agent turn completed"
+                    );
+                }
             }
         }
     }

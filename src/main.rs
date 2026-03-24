@@ -253,6 +253,16 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
         });
     }
 
+    // Start CronSource if memory is available
+    if let Some(ref mem) = memory {
+        let cron_tx = tx.clone();
+        let cron_mem = Arc::clone(mem);
+        tokio::spawn(async move {
+            nocelium_core::sources::CronSource::start(cron_tx, cron_mem).await;
+        });
+        tracing::info!("CronSource spawned");
+    }
+
     drop(tx);
 
     tracing::info!(elapsed_ms = startup.elapsed().as_millis(), channels = channels.len(), "All channels ready, entering agent loop");

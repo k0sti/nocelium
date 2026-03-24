@@ -37,6 +37,7 @@ thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 teloxide = { version = "0.13", features = ["macros"] }
 chrono = "0.4"
+cron = "0.15"
 dirs = "6"
 
 [package]
