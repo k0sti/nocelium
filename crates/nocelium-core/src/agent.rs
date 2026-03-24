@@ -10,6 +10,7 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+use crate::collector::MessageCollector;
 use crate::config::Config;
 use crate::dispatch::{DispatchAction, Dispatcher};
 use crate::identity::Identity;
@@ -180,6 +181,7 @@ pub async fn send_reload_confirmation(channels: &HashMap<String, Arc<dyn Channel
 }
 
 /// The main agent loop: receive events → dispatch → think → respond
+#[allow(clippy::too_many_arguments)]
 pub async fn run_loop(
     agent: &Agent<openai::completion::CompletionModel>,
     event_rx: &mut tokio::sync::mpsc::Receiver<Event>,
@@ -188,6 +190,7 @@ pub async fn run_loop(
     memory: Option<&MemoryClient>,
     tg_ctx: Option<&TelegramContext>,
     state: AgentState,
+    collector: Option<&MessageCollector>,
 ) -> Result<()> {
     tracing::info!("Agent loop started. Waiting for events...");
 
@@ -196,6 +199,13 @@ pub async fn run_loop(
     let dispatch_log = DispatchLogger::new().await;
 
     while let Some(event) = event_rx.recv().await {
+        // Collect inbound message (fire-and-forget)
+        if let Some(c) = collector {
+            let c = c.clone();
+            let ev = event.clone();
+            tokio::spawn(async move { c.collect_inbound(&ev).await });
+        }
+
         let rule = dispatcher.match_rule(&event.key);
         tracing::debug!(key = %event.key, "Dispatching event");
 
@@ -505,7 +515,21 @@ pub async fn run_loop(
                         ..Default::default()
                     };
                     match channel.send(&outbound).await {
-                        Ok(_) => None,
+                        Ok(result) => {
+                            // Collect outbound message (fire-and-forget)
+                            if let Some(c) = collector {
+                                let c = c.clone();
+                                let ch = channel_name.clone();
+                                let ck = chat_key.clone();
+                                let resp = response.clone();
+                                let mid = result.message_id;
+                                let npub = state.npub.clone();
+                                tokio::spawn(async move {
+                                    c.collect_outbound(&ch, &ck, &resp, &mid, &npub).await;
+                                });
+                            }
+                            None
+                        }
                         Err(e) => {
                             tracing::error!(error = %e, channel = %channel_name, "Failed to send response");
                             Some(e.to_string())

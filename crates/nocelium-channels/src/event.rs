@@ -124,11 +124,22 @@ pub struct Message {
     pub chat_type: ChatType,
     pub group_subject: Option<String>,
     pub thread_id: Option<String>,
+    pub thread_name: Option<String>,
     pub reply_to: Option<ReplyContext>,
+    pub forward_from: Option<ForwardInfo>,
+    pub edit_date: Option<u64>,
     pub mentions: Vec<String>,
     pub was_mentioned: bool,
     pub attachments: Vec<Attachment>,
     pub location: Option<Location>,
+}
+
+/// Forwarded message origin info.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForwardInfo {
+    pub source_id: String,
+    pub source_name: Option<String>,
+    pub source_type: Option<String>,
 }
 
 /// Context for a reply.

@@ -277,6 +277,11 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
     // Send reload confirmation if this is a restart after /reload
     nocelium_core::agent::send_reload_confirmation(&channels).await;
 
+    // Message collector (requires memory)
+    let collector = memory.as_ref().map(|mem| {
+        nocelium_core::MessageCollector::new(Arc::clone(mem))
+    });
+
     let agent_state = nocelium_core::agent::AgentState {
         model: config.provider.model.clone(),
         memory_connected: memory.is_some(),
@@ -293,6 +298,7 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
         memory.as_deref(),
         tg_ctx.as_ref(),
         agent_state,
+        collector.as_ref(),
     )
     .await?;
 

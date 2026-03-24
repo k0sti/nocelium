@@ -27,6 +27,12 @@ struct TelegramContextInner {
     thread_id: Option<String>,
 }
 
+impl Default for TelegramContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TelegramContext {
     pub fn new() -> Self {
         Self {

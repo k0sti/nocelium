@@ -179,6 +179,13 @@ impl MemoryClient {
         }
     }
 
+    /// Store a message as a kind 30100 event via Nomen.
+    pub async fn message_store(&self, event: Value) -> Result<(), MemoryError> {
+        let resp = self.request("message.store", json!({ "event": event })).await?;
+        Self::extract_result(resp)?;
+        Ok(())
+    }
+
     /// Delete a memory by topic.
     pub async fn delete(&self, topic: &str) -> Result<(), MemoryError> {
         let resp = self.request("memory.delete", json!({"topic": topic})).await?;
