@@ -154,9 +154,12 @@ impl CronSource {
 }
 
 async fn load_tasks(memory: &MemoryClient) -> Result<HashMap<String, CronTask>> {
-    // Search for cron/* topics
-    let memories = memory.search("cron/", 100, None, None).await
-        .map_err(|e| anyhow::anyhow!("Memory search failed: {e}"))?;
+    // List all memories and filter for cron/* prefix client-side
+    let all_memories = memory.list(None, 500).await
+        .map_err(|e| anyhow::anyhow!("Memory list failed: {e}"))?;
+    let memories: Vec<_> = all_memories.into_iter()
+        .filter(|m| m.topic.starts_with("cron/"))
+        .collect();
 
     let mut tasks = HashMap::new();
 
