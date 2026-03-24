@@ -198,7 +198,21 @@ pub async fn run_loop(
     let active_tasks: Arc<RwLock<Vec<ActiveTask>>> = Arc::new(RwLock::new(Vec::new()));
     let dispatch_log = DispatchLogger::new().await;
 
-    while let Some(event) = event_rx.recv().await {
+    let sigint = tokio::signal::ctrl_c();
+    tokio::pin!(sigint);
+
+    loop {
+        let event = tokio::select! {
+            ev = event_rx.recv() => match ev {
+                Some(e) => e,
+                None => break,
+            },
+            _ = &mut sigint => {
+                tracing::info!("Received Ctrl+C, shutting down...");
+                println!("\nShutting down...");
+                break;
+            }
+        };
         // Collect inbound message (fire-and-forget)
         if let Some(c) = collector {
             let c = c.clone();

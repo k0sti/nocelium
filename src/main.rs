@@ -97,15 +97,15 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Init logging
+    // Init logging — default to warn, RUST_LOG overrides
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("nocelium=info".parse()?)
-                .add_directive("nocelium_core=info".parse()?)
-                .add_directive("nocelium_tools=info".parse()?)
-                .add_directive("nocelium_memory=info".parse()?)
-                .add_directive("nocelium_channels=info".parse()?)
+                .add_directive("nocelium_core=warn".parse()?)
+                .add_directive("nocelium_tools=warn".parse()?)
+                .add_directive("nocelium_memory=warn".parse()?)
+                .add_directive("nocelium_channels=warn".parse()?)
         )
         .init();
 
