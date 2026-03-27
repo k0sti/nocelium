@@ -7,9 +7,7 @@ pub enum DispatchAction {
     /// Build prompt, call LLM
     AgentTurn,
     /// Direct handler, no LLM
-    Handler {
-        name: String,
-    },
+    Handler { name: String },
     /// Ignore the event
     Drop,
 }
@@ -113,14 +111,26 @@ mod tests {
 
     #[test]
     fn test_glob_match_exact() {
-        assert!(glob_match("telegram:message:-1001234", "telegram:message:-1001234"));
-        assert!(!glob_match("telegram:message:-1001234", "telegram:message:-9999"));
+        assert!(glob_match(
+            "telegram:message:-1001234",
+            "telegram:message:-1001234"
+        ));
+        assert!(!glob_match(
+            "telegram:message:-1001234",
+            "telegram:message:-9999"
+        ));
     }
 
     #[test]
     fn test_glob_match_star() {
-        assert!(glob_match("telegram:message:*", "telegram:message:-1001234"));
-        assert!(!glob_match("telegram:message:*", "telegram:message:-1001234:42"));
+        assert!(glob_match(
+            "telegram:message:*",
+            "telegram:message:-1001234"
+        ));
+        assert!(!glob_match(
+            "telegram:message:*",
+            "telegram:message:-1001234:42"
+        ));
     }
 
     #[test]
@@ -145,7 +155,10 @@ mod tests {
     #[test]
     fn test_glob_no_match_different_length() {
         assert!(!glob_match("telegram:message", "telegram:message:-1001234"));
-        assert!(!glob_match("telegram:message:*:*", "telegram:message:-1001234"));
+        assert!(!glob_match(
+            "telegram:message:*:*",
+            "telegram:message:-1001234"
+        ));
     }
 
     #[test]
@@ -153,7 +166,9 @@ mod tests {
         let d = Dispatcher::new(vec![
             DispatchRule {
                 pattern: "telegram:message:direct:*".into(),
-                action: DispatchAction::Handler { name: "dm_handler".into() },
+                action: DispatchAction::Handler {
+                    name: "dm_handler".into(),
+                },
                 prompt_config: None,
             },
             DispatchRule {

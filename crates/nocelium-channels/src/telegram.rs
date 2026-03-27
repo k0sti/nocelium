@@ -67,8 +67,8 @@ impl Channel for TelegramChannel {
         }
 
         let allow_from = self.allow_from.clone();
-        let handler = Update::filter_message().endpoint(
-            move |msg: teloxide::types::Message, _bot: Bot| {
+        let handler =
+            Update::filter_message().endpoint(move |msg: teloxide::types::Message, _bot: Bot| {
                 let tx = tx.clone();
                 let allow_from = allow_from.clone();
                 async move {
@@ -92,13 +92,16 @@ impl Channel for TelegramChannel {
                         .as_ref()
                         .map(|u| u.id.0.to_string())
                         .unwrap_or_default();
-                    let sender_name = msg.from.as_ref().and_then(|u| u.last_name.as_ref().map(
-                        |last| format!("{} {}", u.first_name, last),
-                    )).or_else(|| msg.from.as_ref().map(|u| u.first_name.clone()));
-                    let sender_handle = msg
+                    let sender_name = msg
                         .from
                         .as_ref()
-                        .and_then(|u| u.username.clone());
+                        .and_then(|u| {
+                            u.last_name
+                                .as_ref()
+                                .map(|last| format!("{} {}", u.first_name, last))
+                        })
+                        .or_else(|| msg.from.as_ref().map(|u| u.first_name.clone()));
+                    let sender_handle = msg.from.as_ref().and_then(|u| u.username.clone());
 
                     let chat_type = match &msg.chat.kind {
                         ChatKind::Private(_) => ChatType::Direct,
@@ -107,12 +110,10 @@ impl Channel for TelegramChannel {
 
                     let thread_id = msg.thread_id.map(|t| t.to_string());
 
-                    let reply_to = msg.reply_to_message().map(|r| {
-                        crate::event::ReplyContext {
-                            message_id: r.id.0.to_string(),
-                            text: r.text().map(|t| t.to_string()),
-                            sender: r.from.as_ref().map(|u| u.id.0.to_string()),
-                        }
+                    let reply_to = msg.reply_to_message().map(|r| crate::event::ReplyContext {
+                        message_id: r.id.0.to_string(),
+                        text: r.text().map(|t| t.to_string()),
+                        sender: r.from.as_ref().map(|u| u.id.0.to_string()),
                     });
 
                     let event = Event::new(
@@ -136,8 +137,7 @@ impl Channel for TelegramChannel {
                     let _ = tx.send(event).await;
                     respond(())
                 }
-            },
-        );
+            });
 
         // Drop pending updates from before this boot
         if let Err(e) = self.bot.delete_webhook().drop_pending_updates(true).await {
@@ -155,9 +155,10 @@ impl Channel for TelegramChannel {
     }
 
     async fn send(&self, message: &OutboundMessage) -> Result<SendResult> {
-        let chat_id: i64 = message.chat_id.parse().map_err(|e| {
-            anyhow::anyhow!("Invalid chat_id '{}': {}", message.chat_id, e)
-        })?;
+        let chat_id: i64 = message
+            .chat_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid chat_id '{}': {}", message.chat_id, e))?;
 
         let mut req = self.bot.send_message(ChatId(chat_id), &message.text);
 
@@ -201,7 +202,9 @@ impl Channel for TelegramChannel {
         let msg_id: i32 = message_id.parse()?;
         self.bot
             .set_message_reaction(ChatId(chat), MessageId(msg_id))
-            .reaction(vec![ReactionType::Emoji { emoji: emoji.to_string() }])
+            .reaction(vec![ReactionType::Emoji {
+                emoji: emoji.to_string(),
+            }])
             .await?;
         Ok(())
     }

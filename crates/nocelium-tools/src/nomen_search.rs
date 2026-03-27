@@ -5,8 +5,8 @@ use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use nocelium_memory::MemoryClient;
 use crate::error::NomenToolError;
+use nocelium_memory::MemoryClient;
 
 #[derive(Deserialize, JsonSchema)]
 pub struct NomenSearchInput {

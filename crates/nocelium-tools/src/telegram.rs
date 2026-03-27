@@ -9,8 +9,8 @@ use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use nocelium_channels::{Channel, OutboundMessage};
 use crate::error::NomenToolError;
+use nocelium_channels::{Channel, OutboundMessage};
 
 /// Shared context set by the agent loop before each turn.
 /// Gives tools access to the current channel + chat.
@@ -60,7 +60,9 @@ impl TelegramContext {
         *self.inner.write().await = None;
     }
 
-    async fn get(&self) -> Result<(Arc<dyn Channel>, String, Option<String>, Option<String>), NomenToolError> {
+    async fn get(
+        &self,
+    ) -> Result<(Arc<dyn Channel>, String, Option<String>, Option<String>), NomenToolError> {
         let guard = self.inner.read().await;
         match guard.as_ref() {
             Some(ctx) => Ok((
@@ -108,8 +110,10 @@ impl Tool for TelegramSendTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "telegram_send".into(),
-            description: "Send a message in the current Telegram chat. Returns the sent message ID.".into(),
-            parameters: serde_json::to_value(schemars::schema_for!(TelegramSendInput)).unwrap_or_default(),
+            description:
+                "Send a message in the current Telegram chat. Returns the sent message ID.".into(),
+            parameters: serde_json::to_value(schemars::schema_for!(TelegramSendInput))
+                .unwrap_or_default(),
         }
     }
 
@@ -123,7 +127,9 @@ impl Tool for TelegramSendTool {
             silent: args.silent,
             ..Default::default()
         };
-        let result = channel.send(&msg).await
+        let result = channel
+            .send(&msg)
+            .await
             .map_err(|e| NomenToolError::Memory(e.to_string()))?;
         Ok(format!("Sent message_id={}", result.message_id))
     }
@@ -161,13 +167,16 @@ impl Tool for TelegramEditTool {
         ToolDefinition {
             name: "telegram_edit".into(),
             description: "Edit a previously sent message in the current Telegram chat.".into(),
-            parameters: serde_json::to_value(schemars::schema_for!(TelegramEditInput)).unwrap_or_default(),
+            parameters: serde_json::to_value(schemars::schema_for!(TelegramEditInput))
+                .unwrap_or_default(),
         }
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let (channel, chat_id, _, _) = self.ctx.get().await?;
-        channel.edit(&chat_id, &args.message_id, &args.text).await
+        channel
+            .edit(&chat_id, &args.message_id, &args.text)
+            .await
             .map_err(|e| NomenToolError::Memory(e.to_string()))?;
         Ok(format!("Edited message_id={}", args.message_id))
     }
@@ -203,13 +212,16 @@ impl Tool for TelegramDeleteTool {
         ToolDefinition {
             name: "telegram_delete".into(),
             description: "Delete a message in the current Telegram chat.".into(),
-            parameters: serde_json::to_value(schemars::schema_for!(TelegramDeleteInput)).unwrap_or_default(),
+            parameters: serde_json::to_value(schemars::schema_for!(TelegramDeleteInput))
+                .unwrap_or_default(),
         }
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let (channel, chat_id, _, _) = self.ctx.get().await?;
-        channel.delete(&chat_id, &args.message_id).await
+        channel
+            .delete(&chat_id, &args.message_id)
+            .await
             .map_err(|e| NomenToolError::Memory(e.to_string()))?;
         Ok(format!("Deleted message_id={}", args.message_id))
     }
@@ -247,15 +259,20 @@ impl Tool for TelegramReactTool {
         ToolDefinition {
             name: "telegram_react".into(),
             description: "React to a message with an emoji in the current Telegram chat.".into(),
-            parameters: serde_json::to_value(schemars::schema_for!(TelegramReactInput)).unwrap_or_default(),
+            parameters: serde_json::to_value(schemars::schema_for!(TelegramReactInput))
+                .unwrap_or_default(),
         }
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let (channel, chat_id, current_msg_id, _) = self.ctx.get().await?;
-        let msg_id = args.message_id.or(current_msg_id)
+        let msg_id = args
+            .message_id
+            .or(current_msg_id)
             .ok_or_else(|| NomenToolError::Memory("No message_id to react to".into()))?;
-        channel.react(&chat_id, &msg_id, &args.emoji).await
+        channel
+            .react(&chat_id, &msg_id, &args.emoji)
+            .await
             .map_err(|e| NomenToolError::Memory(e.to_string()))?;
         Ok(format!("Reacted {} to message_id={}", args.emoji, msg_id))
     }

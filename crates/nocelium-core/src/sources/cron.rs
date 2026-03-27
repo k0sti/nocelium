@@ -144,7 +144,9 @@ impl CronSource {
                     }
                     Schedule::Interval(dur) => {
                         if let Some(task) = tasks.get_mut(&task_id) {
-                            task.next_run = Utc::now() + chrono::Duration::from_std(*dur).unwrap_or(chrono::Duration::seconds(60));
+                            task.next_run = Utc::now()
+                                + chrono::Duration::from_std(*dur)
+                                    .unwrap_or(chrono::Duration::seconds(60));
                         }
                     }
                 }
@@ -155,9 +157,12 @@ impl CronSource {
 
 async fn load_tasks(memory: &MemoryClient) -> Result<HashMap<String, CronTask>> {
     // List all memories and filter for cron/* prefix client-side
-    let all_memories = memory.list(None, 500).await
+    let all_memories = memory
+        .list(None, 500)
+        .await
         .map_err(|e| anyhow::anyhow!("Memory list failed: {e}"))?;
-    let memories: Vec<_> = all_memories.into_iter()
+    let memories: Vec<_> = all_memories
+        .into_iter()
         .filter(|m| m.topic.starts_with("cron/"))
         .collect();
 
@@ -168,7 +173,11 @@ async fn load_tasks(memory: &MemoryClient) -> Result<HashMap<String, CronTask>> 
             continue;
         }
 
-        let task_id = mem.topic.strip_prefix("cron/").unwrap_or(&mem.topic).to_string();
+        let task_id = mem
+            .topic
+            .strip_prefix("cron/")
+            .unwrap_or(&mem.topic)
+            .to_string();
 
         let config: CronTaskConfig = match serde_json::from_str(&mem.detail) {
             Ok(c) => c,

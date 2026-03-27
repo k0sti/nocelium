@@ -83,7 +83,8 @@ impl Tool for ShellTool {
 
         tracing::info!(command = %args.command, "Executing shell command");
 
-        let child = cmd.spawn()
+        let child = cmd
+            .spawn()
             .map_err(|e| ShellToolError::ExecutionError(e.to_string()))?;
 
         let result = tokio::time::timeout(

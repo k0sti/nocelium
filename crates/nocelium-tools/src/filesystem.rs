@@ -81,6 +81,10 @@ impl Tool for WriteFileTool {
         tokio::fs::write(&args.path, &args.content)
             .await
             .map_err(|e| FileToolError::Io(e.to_string()))?;
-        Ok(format!("Written {} bytes to {}", args.content.len(), args.path))
+        Ok(format!(
+            "Written {} bytes to {}",
+            args.content.len(),
+            args.path
+        ))
     }
 }

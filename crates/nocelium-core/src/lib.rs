@@ -1,14 +1,14 @@
-pub mod config;
-pub mod dispatch;
-pub mod identity;
 pub mod agent;
-pub mod handlers;
-pub mod sources;
-pub mod logging;
 pub mod collected_message;
 pub mod collector;
+pub mod config;
+pub mod dispatch;
+pub mod handlers;
+pub mod identity;
+pub mod logging;
+pub mod sources;
 
-pub use config::Config;
-pub use dispatch::{Dispatcher, DispatchAction, DispatchRule};
-pub use identity::Identity;
 pub use collector::MessageCollector;
+pub use config::Config;
+pub use dispatch::{DispatchAction, DispatchRule, Dispatcher};
+pub use identity::Identity;

@@ -5,8 +5,8 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nocelium_channels::Channel;
 use nocelium_channels::stdio::StdioChannel;
+use nocelium_channels::Channel;
 use nocelium_core::{Config, Dispatcher, Identity};
 
 #[derive(Parser)]
@@ -105,7 +105,7 @@ async fn main() -> Result<()> {
                 .add_directive("nocelium_core=warn".parse()?)
                 .add_directive("nocelium_tools=warn".parse()?)
                 .add_directive("nocelium_memory=warn".parse()?)
-                .add_directive("nocelium_channels=warn".parse()?)
+                .add_directive("nocelium_channels=warn".parse()?),
         )
         .init();
 
@@ -128,7 +128,10 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
 
     println!("Nocelium v{}", env!("CARGO_PKG_VERSION"));
     println!("Identity: {}", identity.npub());
-    println!("Provider: {} ({})", config.provider.provider_type, config.provider.model);
+    println!(
+        "Provider: {} ({})",
+        config.provider.provider_type, config.provider.model
+    );
     println!();
 
     let memory = if config.memory.enabled {
@@ -139,12 +142,18 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
             identity.nsec(),
         );
         if client.health_check().await {
-            tracing::info!(elapsed_ms = startup.elapsed().as_millis(), "Memory: connected");
+            tracing::info!(
+                elapsed_ms = startup.elapsed().as_millis(),
+                "Memory: connected"
+            );
             println!("Memory: connected ({})", config.memory.socket_path);
             Some(Arc::new(client))
         } else {
             tracing::warn!("Memory: enabled but Nomen unreachable, continuing without memory");
-            println!("Memory: UNAVAILABLE (Nomen unreachable at {})", config.memory.socket_path);
+            println!(
+                "Memory: UNAVAILABLE (Nomen unreachable at {})",
+                config.memory.socket_path
+            );
             None
         }
     } else {
@@ -156,26 +165,41 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
     let tg_ctx = {
         #[cfg(feature = "telegram")]
         {
-            config.channels.telegram.as_ref()
+            config
+                .channels
+                .telegram
+                .as_ref()
                 .filter(|c| c.enabled)
                 .map(|_| nocelium_tools::TelegramContext::new())
         }
         #[cfg(not(feature = "telegram"))]
-        { None::<nocelium_tools::TelegramContext> }
+        {
+            None::<nocelium_tools::TelegramContext>
+        }
     };
 
     // Load initial context from Nomen
     let initial_context = if let Some(ref mem) = memory {
         tracing::info!("Loading initial context from Nomen...");
         let ctx = nocelium_core::agent::load_initial_context(mem, &identity.npub()).await;
-        tracing::info!(elapsed_ms = startup.elapsed().as_millis(), has_context = ctx.is_some(), "Initial context loaded");
+        tracing::info!(
+            elapsed_ms = startup.elapsed().as_millis(),
+            has_context = ctx.is_some(),
+            "Initial context loaded"
+        );
         ctx
     } else {
         None
     };
 
     tracing::info!("Building agent...");
-    let agent = nocelium_core::agent::build_agent(&config, &identity, memory.clone(), tg_ctx.clone(), initial_context.as_deref())?;
+    let agent = nocelium_core::agent::build_agent(
+        &config,
+        &identity,
+        memory.clone(),
+        tg_ctx.clone(),
+        initial_context.as_deref(),
+    )?;
     tracing::info!(elapsed_ms = startup.elapsed().as_millis(), "Agent built");
 
     // Event queue
@@ -216,7 +240,10 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
             );
 
             let tg_channel: Arc<dyn Channel> =
-                Arc::new(nocelium_channels::telegram::TelegramChannel::new(&token, tg_config.allow_from.clone()));
+                Arc::new(nocelium_channels::telegram::TelegramChannel::new(
+                    &token,
+                    tg_config.allow_from.clone(),
+                ));
             channels.insert("telegram".into(), Arc::clone(&tg_channel));
 
             let tg_tx = tx.clone();
@@ -227,7 +254,10 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
                     tracing::error!(error = %e, "Telegram listener failed");
                 }
             });
-            tracing::info!(elapsed_ms = startup.elapsed().as_millis(), "Telegram channel initialized");
+            tracing::info!(
+                elapsed_ms = startup.elapsed().as_millis(),
+                "Telegram channel initialized"
+            );
             println!("Channel: telegram");
         } else {
             tracing::info!("Telegram channel disabled in config");
@@ -265,12 +295,19 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
 
     drop(tx);
 
-    tracing::info!(elapsed_ms = startup.elapsed().as_millis(), channels = channels.len(), "All channels ready, entering agent loop");
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        channels = channels.len(),
+        "All channels ready, entering agent loop"
+    );
     let dispatcher = if config.dispatch.rules.is_empty() {
         tracing::info!("No dispatch rules configured, using default (all → agent_turn)");
         Dispatcher::default_agent_turn()
     } else {
-        tracing::info!(rules = config.dispatch.rules.len(), "Loaded dispatch rules from config");
+        tracing::info!(
+            rules = config.dispatch.rules.len(),
+            "Loaded dispatch rules from config"
+        );
         Dispatcher::new(config.dispatch.rules.clone())
     };
 
@@ -278,9 +315,9 @@ async fn run_agent(config_path: &Option<PathBuf>) -> Result<()> {
     nocelium_core::agent::send_reload_confirmation(&channels).await;
 
     // Message collector (requires memory)
-    let collector = memory.as_ref().map(|mem| {
-        nocelium_core::MessageCollector::new(Arc::clone(mem))
-    });
+    let collector = memory
+        .as_ref()
+        .map(|mem| nocelium_core::MessageCollector::new(Arc::clone(mem)));
 
     let agent_state = nocelium_core::agent::AgentState {
         model: config.provider.model.clone(),
