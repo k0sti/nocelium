@@ -1,10 +1,10 @@
 //! Dispatch logger — writes structured JSONL to ~/.nocelium/logs/dispatch.jsonl
 
+use serde::Serialize;
 use std::path::PathBuf;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
-use serde::Serialize;
 
 /// A single dispatch log entry.
 #[derive(Serialize)]
@@ -17,8 +17,8 @@ pub struct DispatchLogEntry {
     pub rule: String,
     /// Action taken (agent_turn, handler:X, drop)
     pub action: String,
-    /// Source channel name
-    pub channel: Option<String>,
+    /// Source transport/platform name (for example `telegram`)
+    pub platform: Option<String>,
     /// Chat ID
     pub chat_id: Option<String>,
     /// Sender ID

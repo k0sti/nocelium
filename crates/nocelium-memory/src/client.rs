@@ -2,7 +2,9 @@ use nomen_wire::ReconnectingClient;
 use serde_json::{json, Value};
 
 use crate::error::MemoryError;
-use crate::types::{Memory, Visibility};
+use crate::types::{
+    CollectedMessageQueryResult, Memory, MessageContextParams, MessageQueryParams, Visibility,
+};
 
 /// Client for the Nomen memory service over Unix socket.
 pub struct MemoryClient {
@@ -33,30 +35,48 @@ impl MemoryClient {
     /// Authenticate with Nomen using identity.auth if nsec is configured.
     /// Called automatically before the first request.
     async fn ensure_auth(&self) -> Result<(), MemoryError> {
-        if self.nsec.is_none() || self.authenticated.load(std::sync::atomic::Ordering::Relaxed) {
+        if self.nsec.is_none()
+            || self
+                .authenticated
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
             return Ok(());
         }
         let nsec = self.nsec.as_ref().unwrap();
-        let resp = self.wire.request("identity.auth", json!({"nsec": nsec})).await
+        let resp = self
+            .wire
+            .request("identity.auth", json!({"nsec": nsec}))
+            .await
             .map_err(|e| MemoryError::Connection(e.to_string()))?;
         if resp.ok {
-            self.authenticated.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.authenticated
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(result) = &resp.result {
                 tracing::info!(npub = %result.get("npub").and_then(|v| v.as_str()).unwrap_or("?"), "Nomen identity authenticated");
             }
         } else {
             // Auth not supported (old Nomen) or failed — continue without per-session identity
-            let msg = resp.error.map(|e| e.message).unwrap_or_else(|| "Unknown".into());
+            let msg = resp
+                .error
+                .map(|e| e.message)
+                .unwrap_or_else(|| "Unknown".into());
             tracing::warn!("Nomen identity.auth failed: {msg} (continuing with default identity)");
-            self.authenticated.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.authenticated
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(())
     }
 
     /// Send a request to Nomen, ensuring auth is done first.
-    async fn request(&self, action: &str, params: Value) -> Result<nomen_wire::Response, MemoryError> {
+    async fn request(
+        &self,
+        action: &str,
+        params: Value,
+    ) -> Result<nomen_wire::Response, MemoryError> {
         self.ensure_auth().await?;
-        self.wire.request(action, params).await
+        self.wire
+            .request(action, params)
+            .await
             .map_err(|e| MemoryError::Connection(e.to_string()))
     }
 
@@ -181,14 +201,42 @@ impl MemoryClient {
 
     /// Store a message as a kind 30100 event via Nomen.
     pub async fn message_store(&self, event: Value) -> Result<(), MemoryError> {
-        let resp = self.request("message.store", json!({ "event": event })).await?;
+        let resp = self
+            .request("message.store", json!({ "event": event }))
+            .await?;
         Self::extract_result(resp)?;
         Ok(())
     }
 
+    /// Query collected messages using canonical normalized filters.
+    pub async fn message_query(
+        &self,
+        params: &MessageQueryParams,
+    ) -> Result<CollectedMessageQueryResult, MemoryError> {
+        let params =
+            serde_json::to_value(params).map_err(|e| MemoryError::Deserialize(e.to_string()))?;
+        let resp = self.request("message.query", params).await?;
+        let result = Self::extract_result(resp)?;
+        serde_json::from_value(result).map_err(|e| MemoryError::Deserialize(e.to_string()))
+    }
+
+    /// Retrieve surrounding conversation context for collected messages.
+    pub async fn message_context(
+        &self,
+        params: &MessageContextParams,
+    ) -> Result<CollectedMessageQueryResult, MemoryError> {
+        let params =
+            serde_json::to_value(params).map_err(|e| MemoryError::Deserialize(e.to_string()))?;
+        let resp = self.request("message.context", params).await?;
+        let result = Self::extract_result(resp)?;
+        serde_json::from_value(result).map_err(|e| MemoryError::Deserialize(e.to_string()))
+    }
+
     /// Delete a memory by topic.
     pub async fn delete(&self, topic: &str) -> Result<(), MemoryError> {
-        let resp = self.request("memory.delete", json!({"topic": topic})).await?;
+        let resp = self
+            .request("memory.delete", json!({"topic": topic}))
+            .await?;
 
         Self::extract_result(resp)?;
         Ok(())

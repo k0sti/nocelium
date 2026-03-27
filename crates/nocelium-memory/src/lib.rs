@@ -6,4 +6,7 @@ mod types;
 
 pub use client::MemoryClient;
 pub use error::MemoryError;
-pub use types::{Memory, Visibility};
+pub use types::{
+    CollectedMessageEvent, CollectedMessageQueryResult, Memory, MessageContextParams,
+    MessageQueryParams, Visibility,
+};

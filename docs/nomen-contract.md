@@ -60,6 +60,7 @@ let resp = client.request("memory.search", json!({"query": "...", "limit": 10}))
 | `memory.delete` | Remove one-shot cron tasks, config cleanup | `topic` |
 | `memory.pin` | Mark memories for preamble injection | `topic` |
 | `memory.unpin` | Remove from preamble injection | `topic` |
+| `message.store` | Store collected-message kind 30100 events | `event` |
 
 ### Optional (future)
 
@@ -68,8 +69,8 @@ let resp = client.request("memory.search", json!({"query": "...", "limit": 10}))
 | `memory.consolidate` | Periodic memory maintenance |
 | `memory.embed` | Force re-embedding |
 | `memory.sync` | Relay sync |
-| `message.ingest` | Conversation history storage |
-| `message.context` | Retrieve conversation context |
+| `message.query` | Query collected messages with canonical filters |
+| `message.context` | Retrieve surrounding collected-message context |
 | `entity.list` | Knowledge graph queries |
 | `entity.relationships` | Entity relationship lookup |
 
@@ -79,6 +80,20 @@ let resp = client.request("memory.search", json!({"query": "...", "limit": 10}))
 |---|---|
 | `memory.updated` | React to config changes by other agents |
 | `memory.deleted` | React to cron task removal |
+
+## Collected Message Model
+
+For conversation history, Nocelium uses Nomen's normalized collected-message model:
+
+- `platform` — provider namespace such as `telegram` or `discord`
+- `chat_id` — primary conversation boundary inside that platform
+- `thread_id` — optional topic/thread boundary inside a chat
+
+Canonical container identity in Nomen is therefore `platform + chat_id + optional thread_id`, not a single legacy `channel` string.
+
+Nocelium still uses `Channel` terminology internally for transport adapters and routing. When those adapters emit collected messages, the adapter name maps to the canonical Nomen `platform` value.
+
+For new code/docs, prefer `message.store`, `message.query`, and canonical `#proxy` / `#community` / `#chat` / `#thread` filters. Do not teach `message.list` except as legacy compatibility background.
 
 ## Visibility & Scope
 
@@ -92,7 +107,7 @@ Nomen controls access via `visibility` (who can see) and `scope` (within what co
 | `personal` | — | ✅ | Author-private, synced to relays |
 | `internal` | — | ❌ | Local only, never leaves the machine |
 
-Resolution order in Nomen: explicit `visibility`+`scope` params → legacy `tier` param → default channel fallback.
+Resolution order in Nomen: explicit `visibility`+`scope` params → legacy `tier` param → default transport/channel fallback.
 
 ### Nocelium Defaults
 

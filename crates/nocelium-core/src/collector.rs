@@ -38,7 +38,7 @@ impl MessageCollector {
     /// Collect an outbound agent response.
     pub async fn collect_outbound(
         &self,
-        channel_name: &str,
+        platform: &str,
         chat_id: &str,
         text: &str,
         message_id: &str,
@@ -47,12 +47,11 @@ impl MessageCollector {
         if !self.enabled {
             return;
         }
-        let event_json =
-            build_outbound_30100(channel_name, chat_id, text, message_id, identity_npub);
+        let event_json = build_outbound_30100(platform, chat_id, text, message_id, identity_npub);
         if let Err(e) = self.nomen.message_store(event_json).await {
             tracing::warn!(
                 error = %e,
-                channel = channel_name,
+                platform = platform,
                 chat_id = chat_id,
                 "Failed to collect outbound message"
             );

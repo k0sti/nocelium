@@ -1,8 +1,8 @@
 use anyhow::Result;
-use rig::providers::openai;
 use rig::agent::Agent;
 use rig::client::CompletionClient;
 use rig::completion::{Chat, Message};
+use rig::providers::openai;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,11 +14,13 @@ use crate::collector::MessageCollector;
 use crate::config::Config;
 use crate::dispatch::{DispatchAction, Dispatcher};
 use crate::identity::Identity;
-use crate::logging::{DispatchLogger, DispatchLogEntry, preview};
+use crate::logging::{preview, DispatchLogEntry, DispatchLogger};
 use nocelium_channels::{Channel, Event, OutboundMessage, Payload};
 use nocelium_memory::MemoryClient;
-use nocelium_tools::{ShellTool, ReadFileTool, WriteFileTool, NomenSearchTool, NomenStoreTool,
-    TelegramContext, TelegramSendTool, TelegramEditTool, TelegramDeleteTool, TelegramReactTool};
+use nocelium_tools::{
+    NomenSearchTool, NomenStoreTool, ReadFileTool, ShellTool, TelegramContext, TelegramDeleteTool,
+    TelegramEditTool, TelegramReactTool, TelegramSendTool, WriteFileTool,
+};
 
 /// Per-chat conversation history.
 type ChatHistories = Arc<RwLock<HashMap<String, Vec<Message>>>>;
@@ -72,7 +74,9 @@ pub fn build_agent(
         .api_key
         .clone()
         .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
-        .ok_or_else(|| anyhow::anyhow!("No API key. Set OPENROUTER_API_KEY or provider.api_key in config"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("No API key. Set OPENROUTER_API_KEY or provider.api_key in config")
+        })?;
 
     let base_url = config
         .provider
@@ -155,7 +159,10 @@ pub async fn send_reload_confirmation(channels: &HashMap<String, Arc<dyn Channel
     }
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(_) => { let _ = std::fs::remove_file(&path); return false; }
+        Err(_) => {
+            let _ = std::fs::remove_file(&path);
+            return false;
+        }
     };
     let _ = std::fs::remove_file(&path);
 
@@ -165,15 +172,17 @@ pub async fn send_reload_confirmation(channels: &HashMap<String, Arc<dyn Channel
     };
 
     let chat_id = state.get("chat_id").and_then(|v| v.as_str()).unwrap_or("");
-    let channel_name = state.get("channel").and_then(|v| v.as_str()).unwrap_or("");
+    let transport_name = state.get("channel").and_then(|v| v.as_str()).unwrap_or("");
 
-    if let Some(channel) = channels.get(channel_name) {
-        let _ = channel.send(&OutboundMessage {
-            chat_id: chat_id.to_string(),
-            text: "✅ Reloaded successfully".into(),
-            ..Default::default()
-        }).await;
-        tracing::info!(chat_id, channel = channel_name, "Sent reload confirmation");
+    if let Some(channel) = channels.get(transport_name) {
+        let _ = channel
+            .send(&OutboundMessage {
+                chat_id: chat_id.to_string(),
+                text: "✅ Reloaded successfully".into(),
+                ..Default::default()
+            })
+            .await;
+        tracing::info!(chat_id, transport = transport_name, "Sent reload confirmation");
         true
     } else {
         false
@@ -231,10 +240,14 @@ pub async fn run_loop(
                     key: event.key.clone(),
                     rule: rule.pattern.clone(),
                     action: "drop".into(),
-                    channel: event.source.channel_name().map(|s| s.to_string()),
+                    platform: event.source.channel_name().map(|s| s.to_string()),
                     chat_id: event.source.chat_id().map(|s| s.to_string()),
-                    sender_id: None, sender_name: None, message: None,
-                    response: None, duration_ms: None, error: None,
+                    sender_id: None,
+                    sender_name: None,
+                    message: None,
+                    response: None,
+                    duration_ms: None,
+                    error: None,
                 });
                 continue;
             }
@@ -262,9 +275,10 @@ pub async fn run_loop(
                     key: event.key.clone(),
                     rule: rule.pattern.clone(),
                     action: format!("handler:{name}"),
-                    channel: event.source.channel_name().map(|s| s.to_string()),
+                    platform: event.source.channel_name().map(|s| s.to_string()),
                     chat_id: event.source.chat_id().map(|s| s.to_string()),
-                    sender_id: None, sender_name: None,
+                    sender_id: None,
+                    sender_name: None,
                     message: match &event.payload {
                         Payload::Message(m) => Some(preview(&m.text, 200)),
                         _ => None,
@@ -305,7 +319,7 @@ pub async fn run_loop(
                         key: event.key.clone(),
                         rule: rule.pattern.clone(),
                         action: "agent_turn".into(),
-                        channel: event.source.channel_name().map(|s| s.to_string()),
+                        platform: event.source.channel_name().map(|s| s.to_string()),
                         chat_id: event.source.chat_id().map(|s| s.to_string()),
                         sender_id,
                         sender_name,
@@ -318,7 +332,7 @@ pub async fn run_loop(
 
                 let trimmed = text.trim();
                 let chat_key = event.source.chat_id().unwrap_or("local").to_string();
-                let channel_name = event.source.channel_name().unwrap_or("stdio").to_string();
+                let transport_name = event.source.channel_name().unwrap_or("stdio").to_string();
 
                 // ── Commands ──
 
@@ -329,25 +343,31 @@ pub async fn run_loop(
                     let config_path = state.config_path.clone();
                     match Config::load_from_path(config_path.as_deref()) {
                         Ok(_) => {
-                            if let Some(channel) = channels.get(channel_name.as_str()) {
-                                let _ = channel.send(&OutboundMessage {
-                                    chat_id: chat_key.clone(),
-                                    text: "🔄 Reloading...".into(),
-                                    ..Default::default()
-                                }).await;
+                            if let Some(channel) = channels.get(transport_name.as_str()) {
+                                let _ = channel
+                                    .send(&OutboundMessage {
+                                        chat_id: chat_key.clone(),
+                                        text: "🔄 Reloading...".into(),
+                                        ..Default::default()
+                                    })
+                                    .await;
                             }
-                            save_reload_state(&chat_key, &channel_name);
+                            save_reload_state(&chat_key, &transport_name);
                             std::process::exit(0);
                         }
                         Err(e) => {
-                            let msg = format!("❌ Config validation failed:\n```\n{e}\n```\nNot reloading.");
+                            let msg = format!(
+                                "❌ Config validation failed:\n```\n{e}\n```\nNot reloading."
+                            );
                             tracing::error!(error = %e, "Config validation failed");
-                            if let Some(channel) = channels.get(channel_name.as_str()) {
-                                let _ = channel.send(&OutboundMessage {
-                                    chat_id: chat_key,
-                                    text: msg,
-                                    ..Default::default()
-                                }).await;
+                            if let Some(channel) = channels.get(transport_name.as_str()) {
+                                let _ = channel
+                                    .send(&OutboundMessage {
+                                        chat_id: chat_key,
+                                        text: msg,
+                                        ..Default::default()
+                                    })
+                                    .await;
                             }
                             continue;
                         }
@@ -360,12 +380,14 @@ pub async fn run_loop(
                         h.remove(&chat_key).map(|v| v.len()).unwrap_or(0)
                     };
                     tracing::info!(chat = %chat_key, messages_cleared = cleared, "Session reset");
-                    if let Some(channel) = channels.get(channel_name.as_str()) {
-                        let _ = channel.send(&OutboundMessage {
-                            chat_id: chat_key,
-                            text: format!("🔄 Session reset ({} messages cleared)", cleared),
-                            ..Default::default()
-                        }).await;
+                    if let Some(channel) = channels.get(transport_name.as_str()) {
+                        let _ = channel
+                            .send(&OutboundMessage {
+                                chat_id: chat_key,
+                                text: format!("🔄 Session reset ({} messages cleared)", cleared),
+                                ..Default::default()
+                            })
+                            .await;
                     }
                     continue;
                 }
@@ -378,22 +400,32 @@ pub async fn run_loop(
                         for task in tasks.drain(..) {
                             let elapsed = task.started.elapsed();
                             task.cancel.cancel();
-                            report.push(format!("  • chat {} ({:.1}s)", task.chat_id, elapsed.as_secs_f64()));
+                            report.push(format!(
+                                "  • chat {} ({:.1}s)",
+                                task.chat_id,
+                                elapsed.as_secs_f64()
+                            ));
                         }
                         (count, report)
                     };
                     let msg = if cancelled.0 == 0 {
                         "🛑 No active tasks".into()
                     } else {
-                        format!("🛑 Stopped {} task(s):\n{}", cancelled.0, cancelled.1.join("\n"))
+                        format!(
+                            "🛑 Stopped {} task(s):\n{}",
+                            cancelled.0,
+                            cancelled.1.join("\n")
+                        )
                     };
                     tracing::info!(stopped = cancelled.0, "Stop command");
-                    if let Some(channel) = channels.get(channel_name.as_str()) {
-                        let _ = channel.send(&OutboundMessage {
-                            chat_id: chat_key,
-                            text: msg,
-                            ..Default::default()
-                        }).await;
+                    if let Some(channel) = channels.get(transport_name.as_str()) {
+                        let _ = channel
+                            .send(&OutboundMessage {
+                                chat_id: chat_key,
+                                text: msg,
+                                ..Default::default()
+                            })
+                            .await;
                     }
                     continue;
                 }
@@ -420,17 +452,23 @@ pub async fn run_loop(
                         state.model,
                         uptime.as_secs() / 60,
                         uptime.as_secs() % 60,
-                        if state.memory_connected { "connected" } else { "unavailable" },
+                        if state.memory_connected {
+                            "connected"
+                        } else {
+                            "unavailable"
+                        },
                         active_count,
                         history_info.0,
                         history_info.1,
                     );
-                    if let Some(channel) = channels.get(channel_name.as_str()) {
-                        let _ = channel.send(&OutboundMessage {
-                            chat_id: chat_key,
-                            text: status,
-                            ..Default::default()
-                        }).await;
+                    if let Some(channel) = channels.get(transport_name.as_str()) {
+                        let _ = channel
+                            .send(&OutboundMessage {
+                                chat_id: chat_key,
+                                text: status,
+                                ..Default::default()
+                            })
+                            .await;
                     }
                     continue;
                 }
@@ -448,7 +486,8 @@ pub async fn run_loop(
                         chat_key.clone(),
                         msg.map(|m| m.id.clone()),
                         msg.and_then(|m| m.thread_id.clone()),
-                    ).await;
+                    )
+                    .await;
                 }
 
                 tracing::debug!(message = %text, chat = %chat_key, "Processing message");
@@ -505,13 +544,13 @@ pub async fn run_loop(
                     let entry = h.entry(chat_key.clone()).or_default();
                     entry.push(Message::User {
                         content: rig::one_or_many::OneOrMany::one(
-                            rig::completion::message::UserContent::text(&text_owned)
+                            rig::completion::message::UserContent::text(&text_owned),
                         ),
                     });
                     entry.push(Message::Assistant {
                         id: None,
                         content: rig::one_or_many::OneOrMany::one(
-                            rig::completion::message::AssistantContent::text(&response)
+                            rig::completion::message::AssistantContent::text(&response),
                         ),
                     });
 
@@ -522,7 +561,7 @@ pub async fn run_loop(
                 }
 
                 // Send response
-                let send_error = if let Some(channel) = channels.get(channel_name.as_str()) {
+                let send_error = if let Some(channel) = channels.get(transport_name.as_str()) {
                     let outbound = OutboundMessage {
                         chat_id: chat_key.clone(),
                         text: response.clone(),
@@ -533,25 +572,25 @@ pub async fn run_loop(
                             // Collect outbound message (fire-and-forget)
                             if let Some(c) = collector {
                                 let c = c.clone();
-                                let ch = channel_name.clone();
+                                let transport = transport_name.clone();
                                 let ck = chat_key.clone();
                                 let resp = response.clone();
                                 let mid = result.message_id;
                                 let npub = state.npub.clone();
                                 tokio::spawn(async move {
-                                    c.collect_outbound(&ch, &ck, &resp, &mid, &npub).await;
+                                    c.collect_outbound(&transport, &ck, &resp, &mid, &npub).await;
                                 });
                             }
                             None
                         }
                         Err(e) => {
-                            tracing::error!(error = %e, channel = %channel_name, "Failed to send response");
+                            tracing::error!(error = %e, transport = %transport_name, "Failed to send response");
                             Some(e.to_string())
                         }
                     }
                 } else {
-                    tracing::error!(channel = %channel_name, "No channel found for response routing");
-                    Some(format!("No channel: {channel_name}"))
+                    tracing::error!(transport = %transport_name, "No transport found for response routing");
+                    Some(format!("No transport: {transport_name}"))
                 };
 
                 // Log completion (separate from dispatch log above)

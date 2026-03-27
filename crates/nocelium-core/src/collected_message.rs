@@ -9,7 +9,7 @@ pub fn build_inbound_30100(event: &Event) -> Option<Value> {
         Payload::Message(msg) => msg,
         _ => return None,
     };
-    let (channel_name, chat_id, sender_id) = match &event.source {
+    let (platform, chat_id, sender_id) = match &event.source {
         Source::Channel {
             name,
             chat_id,
@@ -18,10 +18,10 @@ pub fn build_inbound_30100(event: &Event) -> Option<Value> {
         _ => return None,
     };
 
-    let d_tag = format!("{channel_name}:{chat_id}:{}", msg.id);
+    let d_tag = format!("{platform}:{chat_id}:{}", msg.id);
     let mut tags: Vec<Value> = vec![
         json!(["d", &d_tag]),
-        json!(["proxy", &d_tag, channel_name]),
+        json!(["proxy", &d_tag, platform]),
         json!([
             "chat",
             chat_id,
@@ -45,7 +45,7 @@ pub fn build_inbound_30100(event: &Event) -> Option<Value> {
     }
 
     if let Some(ref reply) = msg.reply_to {
-        let reply_d = format!("{channel_name}:{chat_id}:{}", reply.message_id);
+        let reply_d = format!("{platform}:{chat_id}:{}", reply.message_id);
         tags.push(json!([
             "reply",
             reply_d,
@@ -86,7 +86,11 @@ pub fn build_inbound_30100(event: &Event) -> Option<Value> {
     }
 
     if let Some(ref loc) = msg.location {
-        tags.push(json!(["location", loc.latitude.to_string(), loc.longitude.to_string()]));
+        tags.push(json!([
+            "location",
+            loc.latitude.to_string(),
+            loc.longitude.to_string()
+        ]));
     }
 
     // Attachment captions go into content (after message text)
@@ -102,19 +106,19 @@ pub fn build_inbound_30100(event: &Event) -> Option<Value> {
 
 /// Build a kind 30100 event JSON for an outbound agent response.
 pub fn build_outbound_30100(
-    channel_name: &str,
+    platform: &str,
     chat_id: &str,
     text: &str,
     message_id: &str,
     identity_npub: &str,
 ) -> Value {
-    let d_tag = format!("{channel_name}:{chat_id}:{message_id}");
+    let d_tag = format!("{platform}:{chat_id}:{message_id}");
     json!({
         "kind": 30100,
         "content": text,
         "tags": [
             ["d", d_tag],
-            ["proxy", d_tag, channel_name],
+            ["proxy", d_tag, platform],
             ["chat", chat_id, "", ""],
             ["sender", identity_npub, "agent", ""],
             ["direction", "outbound"],

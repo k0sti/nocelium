@@ -39,7 +39,9 @@ See [nomen-contract.md](nomen-contract.md) for wire protocol details and all dis
 
 ## Client Interface
 
-`nocelium-memory` wraps `nomen-wire::ReconnectingClient` with typed convenience methods:
+`nocelium-memory` wraps `nomen-wire::ReconnectingClient` with typed convenience methods.
+
+Current surface is intentionally small and aligned with what Nocelium actually uses:
 
 ```rust
 struct MemoryClient {
@@ -47,20 +49,17 @@ struct MemoryClient {
 }
 
 impl MemoryClient {
-    // Read
-    async fn search(&self, query: &str, limit: usize, visibility: Option<Visibility>, scope: Option<&str>) -> Result<Vec<Memory>>;
+    // Memory reads/writes
+    async fn search(&self, query: &str, limit: usize, visibility: Option<&Visibility>, scope: Option<&str>) -> Result<Vec<Memory>>;
     async fn get(&self, topic: &str) -> Result<Option<Memory>>;
-    async fn get_batch(&self, topics: &[&str]) -> Result<Vec<Memory>>;
-    async fn list(&self, prefix: &str) -> Result<Vec<Memory>>;
-
-    // Write (applies topic-based visibility defaults if not specified)
-    async fn store(&self, topic: &str, summary: &str, detail: &str, visibility: Option<Visibility>, scope: Option<&str>) -> Result<String>;
+    async fn list(&self, visibility: Option<&Visibility>, limit: usize) -> Result<Vec<Memory>>;
+    async fn store(&self, topic: &str, detail: &str, visibility: Option<&Visibility>, scope: Option<&str>) -> Result<String>;
     async fn delete(&self, topic: &str) -> Result<()>;
-    async fn pin(&self, topic: &str) -> Result<()>;
-    async fn unpin(&self, topic: &str) -> Result<()>;
 
-    // Push events
-    async fn subscribe(&self, events: &[&str]) -> Result<EventStream>;
+    // Collected messages
+    async fn message_store(&self, event: Value) -> Result<()>;
+    async fn message_query(&self, params: &MessageQueryParams) -> Result<CollectedMessageQueryResult>;
+    async fn message_context(&self, params: &MessageContextParams) -> Result<CollectedMessageQueryResult>;
 }
 ```
 
@@ -69,11 +68,10 @@ impl MemoryClient {
 ```rust
 struct Memory {
     pub topic: String,
-    pub summary: String,
-    pub detail: Option<String>,
-    pub score: Option<f64>,         // relevance score from search
-    pub visibility: Visibility,
-    pub scope: Option<String>,      // context qualifier (group ID, channel, etc.)
+    pub detail: String,
+    pub confidence: Option<f64>,
+    pub visibility: Option<String>,
+    pub scope: Option<String>,      // context qualifier (group ID, room, etc.)
 }
 
 /// Maps to Nomen's visibility levels.
@@ -85,6 +83,17 @@ enum Visibility {
     Internal,    // agent-private, never synced to relays
 }
 ```
+
+### Collected Message Model
+
+For conversation history, canonical container identity comes from normalized collected-message fields:
+
+- `platform`
+- optional `community`
+- `chat_id`
+- optional `thread_id`
+
+Use `message.store` for writes and `message.query` / `message.context` for reads. Do not teach `message.list` or a single legacy `channel` field as the canonical message container identity.
 
 ### Visibility + Scope
 
@@ -107,7 +116,6 @@ Nomen uses `visibility` (who can see it) and `scope` (within what context) toget
 | Knowledge | `group` or `public` | Collective memory — meant to be shared |
 
 The `MemoryClient` applies these defaults but allows override per call.
-```
 
 ## Integration Points
 
@@ -158,9 +166,11 @@ sequenceDiagram
 | `memory.search` | Semantic search (vector + keyword + graph) |
 | `memory.put` | Store a memory |
 | `memory.get` | Retrieve by topic |
-| `memory.get_batch` | Retrieve multiple topics (startup) |
-| `memory.list` | List by prefix (config/*, cron/*) |
+| `memory.list` | List memories |
 | `memory.delete` | Remove a memory |
+| `message.store` | Store collected-message kind 30100 events |
+| `message.query` | Query collected messages with canonical filters |
+| `message.context` | Retrieve surrounding collected-message context |
 | `memory.pin` / `memory.unpin` | Control preamble injection |
 | `memory.consolidate` | Merge and prune |
 
