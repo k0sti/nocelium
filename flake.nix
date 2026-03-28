@@ -25,11 +25,15 @@
             pkgs.pkg-config
             pkgs.openssl
             pkgs.just
+            pkgs.mold
+            pkgs.sccache
+            pkgs.clang
           ];
 
           OPENSSL_DIR = "${pkgs.openssl.dev}";
           OPENSSL_LIB_DIR = "${pkgs.openssl.out}/lib";
           OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";
+          RUSTC_WRAPPER = "sccache";
         };
       });
 }

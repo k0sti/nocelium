@@ -62,3 +62,10 @@ dirs = { workspace = true }
 
 [features]
 telegram = ["nocelium-channels/telegram"]
+
+[profile.dev]
+split-debuginfo = "unpacked"  # Faster linking on Linux
+
+[profile.release]
+lto = "thin"        # Good optimization without slow full LTO
+codegen-units = 1   # Better optimization for release
