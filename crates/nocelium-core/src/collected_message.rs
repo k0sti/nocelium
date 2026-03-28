@@ -21,6 +21,7 @@ pub fn build_inbound_30100(event: &Event) -> Option<Value> {
     let d_tag = format!("{platform}:{chat_id}:{}", msg.id);
     let mut tags: Vec<Value> = vec![
         json!(["d", &d_tag]),
+        json!(["platform", platform]),
         json!(["proxy", &d_tag, platform]),
         json!([
             "chat",
@@ -118,6 +119,7 @@ pub fn build_outbound_30100(
         "content": text,
         "tags": [
             ["d", d_tag],
+            ["platform", platform],
             ["proxy", d_tag, platform],
             ["chat", chat_id, "", ""],
             ["sender", identity_npub, "agent", ""],
@@ -200,18 +202,23 @@ mod tests {
         let d = tags[0].as_array().unwrap();
         assert_eq!(d[1], "telegram:-1001234:99");
 
+        // platform tag
+        let plat = tags[1].as_array().unwrap();
+        assert_eq!(plat[0], "platform");
+        assert_eq!(plat[1], "telegram");
+
         // proxy tag: NIP-48 format ["proxy", d_tag, platform]
-        let proxy = tags[1].as_array().unwrap();
+        let proxy = tags[2].as_array().unwrap();
         assert_eq!(proxy[0], "proxy");
         assert_eq!(proxy[1], "telegram:-1001234:99");
         assert_eq!(proxy[2], "telegram");
 
-        let sender = tags[3].as_array().unwrap();
+        let sender = tags[4].as_array().unwrap();
         assert_eq!(sender[1], "user42");
         assert_eq!(sender[2], "Alice");
         assert_eq!(sender[3], "alice");
 
-        let chat = tags[2].as_array().unwrap();
+        let chat = tags[3].as_array().unwrap();
         assert_eq!(chat[3], "group");
     }
 
@@ -390,8 +397,13 @@ mod tests {
         let d = tags[0].as_array().unwrap();
         assert_eq!(d[1], "telegram:-1001234:101");
 
+        // platform tag
+        let plat = tags[1].as_array().unwrap();
+        assert_eq!(plat[0], "platform");
+        assert_eq!(plat[1], "telegram");
+
         // proxy uses d_tag, not chat_id
-        let proxy = tags[1].as_array().unwrap();
+        let proxy = tags[2].as_array().unwrap();
         assert_eq!(proxy[1], "telegram:-1001234:101");
         assert_eq!(proxy[2], "telegram");
 

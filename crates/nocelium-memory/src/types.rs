@@ -66,8 +66,8 @@ impl Visibility {
 /// Query filters for collected messages.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MessageQueryParams {
-    #[serde(rename = "#proxy", skip_serializing_if = "Option::is_none")]
-    pub proxy: Option<Vec<String>>,
+    #[serde(rename = "#platform", skip_serializing_if = "Option::is_none")]
+    pub platform: Option<Vec<String>>,
     #[serde(rename = "#community", skip_serializing_if = "Option::is_none")]
     pub community: Option<Vec<String>>,
     #[serde(rename = "#chat", skip_serializing_if = "Option::is_none")]
@@ -87,8 +87,8 @@ pub struct MessageQueryParams {
 /// Context window request for collected messages.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MessageContextParams {
-    #[serde(rename = "#proxy", skip_serializing_if = "Option::is_none")]
-    pub proxy: Option<Vec<String>>,
+    #[serde(rename = "#platform", skip_serializing_if = "Option::is_none")]
+    pub platform: Option<Vec<String>>,
     #[serde(rename = "#community", skip_serializing_if = "Option::is_none")]
     pub community: Option<Vec<String>>,
     #[serde(rename = "#chat", skip_serializing_if = "Option::is_none")]
@@ -133,10 +133,14 @@ impl CollectedMessageEvent {
     }
 
     pub fn platform(&self) -> Option<&str> {
-        self.tags
-            .iter()
-            .find(|tag| tag.first().map(|v| v.as_str()) == Some("proxy"))
-            .and_then(|tag| tag.get(2).map(|v| v.as_str()))
+        // Prefer dedicated platform tag, fall back to proxy tag for compat
+        self.first_tag_value("platform")
+            .or_else(|| {
+                self.tags
+                    .iter()
+                    .find(|tag| tag.first().map(|v| v.as_str()) == Some("proxy"))
+                    .and_then(|tag| tag.get(2).map(|v| v.as_str()))
+            })
     }
 
     pub fn chat_id(&self) -> Option<&str> {
@@ -169,7 +173,7 @@ mod tests {
     #[test]
     fn message_query_params_serialize_canonical_filters() {
         let params = MessageQueryParams {
-            proxy: Some(vec!["telegram".into()]),
+            platform: Some(vec!["telegram".into()]),
             chat: Some(vec!["-1003821690204".into()]),
             thread: Some(vec!["12983".into()]),
             since: Some(json!(1711540200)),
@@ -178,7 +182,7 @@ mod tests {
         };
 
         let value = serde_json::to_value(&params).unwrap();
-        assert_eq!(value["#proxy"], json!(["telegram"]));
+        assert_eq!(value["#platform"], json!(["telegram"]));
         assert_eq!(value["#chat"], json!(["-1003821690204"]));
         assert_eq!(value["#thread"], json!(["12983"]));
         assert_eq!(value["since"], json!(1711540200));
@@ -195,6 +199,7 @@ mod tests {
                 "created_at": 1711540200,
                 "content": "hello",
                 "tags": [
+                    ["platform", "telegram"],
                     ["proxy", "telegram:-1003821690204:1", "telegram"],
                     ["chat", "-1003821690204"],
                     ["thread", "12983"]
@@ -208,7 +213,7 @@ mod tests {
         assert_eq!(result.events.len(), 1);
         assert_eq!(result.events[0].kind, Some(30100));
         assert_eq!(result.events[0].content, "hello");
-        assert_eq!(result.events[0].tags[0][0], "proxy");
+        assert_eq!(result.events[0].tags[0][0], "platform");
         assert_eq!(result.events[0].platform(), Some("telegram"));
         assert_eq!(result.events[0].chat_id(), Some("-1003821690204"));
         assert_eq!(result.events[0].thread_id(), Some("12983"));
