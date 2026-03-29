@@ -47,7 +47,11 @@ enum Command {
 #[derive(Subcommand)]
 enum ServiceAction {
     /// Install systemd user service
-    Install,
+    Install {
+        /// Overwrite even if managed by Nix
+        #[arg(long)]
+        force: bool,
+    },
     /// Start the service
     Start,
     /// Stop the service
@@ -56,12 +60,14 @@ enum ServiceAction {
     Restart,
     /// Show service status
     Status,
-    /// Follow service logs
+    /// Show service logs
     Logs {
         /// Follow log output
         #[arg(short, long)]
         follow: bool,
     },
+    /// Follow service logs (shortcut for `logs -f`)
+    Follow,
     /// Uninstall the service
     Uninstall,
 }
@@ -82,6 +88,32 @@ enum ConfigAction {
     Migrate,
 }
 
+/// Compact timestamp: `MM-DD HH:MM:SS`
+struct CompactTimer;
+impl tracing_subscriber::fmt::time::FormatTime for CompactTimer {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        use std::time::SystemTime;
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let secs_in_day = now % 86400;
+        let hour = secs_in_day / 3600;
+        let min = (secs_in_day % 3600) / 60;
+        let sec = secs_in_day % 60;
+        let days = (now / 86400) as i64 + 719468;
+        let era = days.div_euclid(146097);
+        let doe = days.rem_euclid(146097);
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let _year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
+        write!(w, "{month:02}-{day:02} {hour:02}:{min:02}:{sec:02}")
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -97,16 +129,17 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Init logging — default to warn, RUST_LOG overrides
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("nocelium=info".parse()?)
-                .add_directive("nocelium_core=warn".parse()?)
-                .add_directive("nocelium_tools=warn".parse()?)
-                .add_directive("nocelium_memory=warn".parse()?)
-                .add_directive("nocelium_channels=warn".parse()?),
+    // Init logging — RUST_LOG overrides defaults
+    let env_filter = if std::env::var("RUST_LOG").is_ok() {
+        tracing_subscriber::EnvFilter::from_default_env()
+    } else {
+        tracing_subscriber::EnvFilter::new(
+            "warn,nocelium=info,nocelium_core=warn,nocelium_tools=warn,nocelium_memory=warn,nocelium_channels=warn"
         )
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_timer(CompactTimer)
         .init();
 
     match command {
@@ -392,7 +425,21 @@ async fn handle_service(action: &ServiceAction, config_path: &Option<PathBuf>) -
     let service_file = service_dir.join(format!("{SERVICE_NAME}.service"));
 
     match action {
-        ServiceAction::Install => {
+        ServiceAction::Install { force } => {
+            // Check for Nix-managed symlink
+            if service_file.symlink_metadata().ok().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                let target = std::fs::read_link(&service_file).unwrap_or_default();
+                if target.to_string_lossy().contains("/nix/store/") {
+                    if !force {
+                        println!("Warning: {} is a Nix-managed symlink.", service_file.display());
+                        println!("  Use --force to remove the symlink and install a regular unit file.");
+                        return Ok(());
+                    }
+                    std::fs::remove_file(&service_file)?;
+                    println!("Removed Nix-managed symlink: {}", service_file.display());
+                }
+            }
+
             let exe = std::env::current_exe()?;
             let exe_path = exe.display();
 
@@ -465,9 +512,10 @@ WantedBy=default.target
             let _ = run_systemctl(&["status", SERVICE_NAME]);
         }
 
-        ServiceAction::Logs { follow } => {
-            let mut args = vec!["--user", "-u", SERVICE_NAME];
-            if *follow {
+        ServiceAction::Logs { .. } | ServiceAction::Follow => {
+            let follow = matches!(action, ServiceAction::Follow | ServiceAction::Logs { follow: true });
+            let mut args = vec!["-o", "cat", "--user", "-u", SERVICE_NAME, "--no-pager"];
+            if follow {
                 args.push("-f");
             }
             let status = std::process::Command::new("journalctl")
@@ -479,6 +527,14 @@ WantedBy=default.target
         }
 
         ServiceAction::Uninstall => {
+            if service_file.symlink_metadata().ok().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                let target = std::fs::read_link(&service_file).unwrap_or_default();
+                if target.to_string_lossy().contains("/nix/store/") {
+                    println!("Warning: {} is managed by Nix.", service_file.display());
+                    println!("  Remove the service from your nix-config instead.");
+                    return Ok(());
+                }
+            }
             let _ = run_systemctl(&["disable", "--now", SERVICE_NAME]);
             if service_file.exists() {
                 std::fs::remove_file(&service_file)?;
