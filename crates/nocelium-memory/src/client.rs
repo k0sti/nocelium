@@ -68,16 +68,41 @@ impl MemoryClient {
     }
 
     /// Send a request to Nomen, ensuring auth is done first.
+    /// If the response is `auth_required`, re-authenticates and retries once
+    /// (handles reconnection to a new socket session).
     async fn request(
         &self,
         action: &str,
         params: Value,
     ) -> Result<nomen_wire::Response, MemoryError> {
         self.ensure_auth().await?;
-        self.wire
-            .request(action, params)
+        let resp = self
+            .wire
+            .request(action, params.clone())
             .await
-            .map_err(|e| MemoryError::Connection(e.to_string()))
+            .map_err(|e| MemoryError::Connection(e.to_string()))?;
+
+        // If auth_required, the socket reconnected to a fresh session — re-auth and retry.
+        if !resp.ok {
+            let is_auth_required = resp
+                .error
+                .as_ref()
+                .map(|e| e.code == "auth_required")
+                .unwrap_or(false);
+            if is_auth_required && self.nsec.is_some() {
+                tracing::debug!("Got auth_required, re-authenticating after reconnect");
+                self.authenticated
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                self.ensure_auth().await?;
+                return self
+                    .wire
+                    .request(action, params)
+                    .await
+                    .map_err(|e| MemoryError::Connection(e.to_string()));
+            }
+        }
+
+        Ok(resp)
     }
 
     /// Extract result from a nomen-wire Response, mapping errors.

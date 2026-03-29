@@ -99,6 +99,7 @@ pub fn build_inbound_30100(event: &Event) -> Option<Value> {
 
     Some(json!({
         "kind": 30100,
+        "pubkey": "",
         "content": content,
         "tags": tags,
         "created_at": event.timestamp,
@@ -116,6 +117,7 @@ pub fn build_outbound_30100(
     let d_tag = format!("{platform}:{chat_id}:{message_id}");
     json!({
         "kind": 30100,
+        "pubkey": identity_npub,
         "content": text,
         "tags": [
             ["d", d_tag],
